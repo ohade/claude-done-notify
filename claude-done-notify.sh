@@ -186,8 +186,10 @@ if [[ -z "$SESSION_NAME" || "$SESSION_NAME" == "null" ]]; then
     fi
 fi
 
-# ── Build bottom line from last_assistant_message ──
-BOTTOM_LINE=""
+# ── Build message body from last_assistant_message ──
+# Two versions: TLDR (push notification) and FULL_BODY (in-app blocks)
+TLDR=""
+FULL_BODY=""
 RAW_TEXT=""
 
 # Primary: use last_assistant_message from hook stdin
@@ -203,20 +205,33 @@ if [[ -z "$RAW_TEXT" && -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
 fi
 
 if [[ -n "$RAW_TEXT" ]]; then
-    BOTTOM_LINE=$(echo "$RAW_TEXT" \
+    # Clean text: strip markdown headers, bold, backticks, XML tags, filler lines
+    CLEANED=$(echo "$RAW_TEXT" \
         | sed 's/^#\+[[:space:]]*//' \
         | sed 's/\*\*//g' \
-        | sed 's/`//g' \
         | sed 's/<[^>]*>//g' \
         | grep -v '^$' \
-        | grep -vi '^\(all done\|here.s the summary\|here.s what\|let me\|i.ll \|done\.\|sure\|okay\|$\)' \
-        | head -5 \
+        | grep -vi '^\(all done\|here.s the summary\|here.s what\|let me\|i.ll \|done\.\|sure\|okay\|$\)')
+
+    # TLDR: first 2 meaningful lines, 150 chars — for push notifications
+    TLDR=$(echo "$CLEANED" \
+        | sed 's/`//g' \
+        | head -2 \
         | paste -sd ' ' - \
-        | cut -c1-300)
+        | cut -c1-150)
+
+    # Full body: up to 2900 chars (Slack block text limit is 3000) — for in-app view
+    # Preserve newlines for readable multi-line display in Slack
+    FULL_BODY=$(echo "$CLEANED" \
+        | head -40 \
+        | cut -c1-200)
+    # Trim to 2900 chars total
+    FULL_BODY="${FULL_BODY:0:2900}"
 fi
 
-echo "$(date '+%H:%M:%S') bottom_line='$(echo "$BOTTOM_LINE" | cut -c1-50)...'" >&2
-[[ -z "$BOTTOM_LINE" ]] && BOTTOM_LINE="Task completed — check terminal for details."
+echo "$(date '+%H:%M:%S') tldr='$(echo "$TLDR" | cut -c1-50)...' full_len=${#FULL_BODY}" >&2
+[[ -z "$TLDR" ]] && TLDR="Task completed — check terminal for details."
+[[ -z "$FULL_BODY" ]] && FULL_BODY="$TLDR"
 
 # ── Format duration for display ──
 if [[ "$DURATION" -ge 60 ]]; then
@@ -265,7 +280,7 @@ CONTEXT_PARTS="${CONTEXT_PARTS}:stopwatch: ${DURATION_DISPLAY}  "
 BLOCKS=$(jq -n \
     --arg header "$HEADER_TEXT" \
     --arg context "$CONTEXT_PARTS" \
-    --arg body "$BOTTOM_LINE" \
+    --arg body "$FULL_BODY" \
     '[
         {
             "type": "section",
@@ -283,8 +298,8 @@ BLOCKS=$(jq -n \
         }
     ]')
 
-# Fallback text for notifications/mobile
-FALLBACK_TEXT="${SESSION_NAME} — ${BOTTOM_LINE}"
+# Fallback text for push notifications / mobile (short TLDR)
+FALLBACK_TEXT="${SESSION_NAME} — ${TLDR}"
 
 # ── Send Slack message ──
 if [[ -n "$SLACK_BOT_TOKEN" && "$SLACK_BOT_TOKEN" != "null" ]]; then
