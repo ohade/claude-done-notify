@@ -218,18 +218,73 @@ fi
 echo "$(date '+%H:%M:%S') bottom_line='$(echo "$BOTTOM_LINE" | cut -c1-50)...'" >&2
 [[ -z "$BOTTOM_LINE" ]] && BOTTOM_LINE="Task completed — check terminal for details."
 
-# ── Format the Slack message ──
-HEADER="*${SESSION_NAME}*"
+# ── Format duration for display ──
+if [[ "$DURATION" -ge 60 ]]; then
+    DURATION_DISPLAY="$((DURATION / 60))m $((DURATION % 60))s"
+else
+    DURATION_DISPLAY="${DURATION}s"
+fi
+
+# ── Build WezTerm focus link ──
+FOCUS_LINK=""
+FOCUS_PORT="${CDN_FOCUS_PORT:-17380}"
+if [[ -n "$MY_PANE_ID" ]]; then
+    FOCUS_LINK="http://127.0.0.1:${FOCUS_PORT}/focus?pane=${MY_PANE_ID}"
+fi
+
+# ── Build location line ──
+LOCATION=""
 if [[ -n "$PANE_TITLE" ]]; then
     CLEAN_PANE=$(echo "$PANE_TITLE" | sed 's/^[^a-zA-Z0-9]*//')
     if [[ -n "$TAB_NUMBER" ]]; then
-        HEADER="${HEADER}  ·  _Tab ${TAB_NUMBER}: ${CLEAN_PANE}_"
-    else
-        HEADER="${HEADER}  ·  _${CLEAN_PANE}_"
+        LOCATION="Tab ${TAB_NUMBER}"
     fi
 fi
 
-SLACK_TEXT=$(printf '%s\n\n%s' "$HEADER" "$BOTTOM_LINE")
+# ── Short CWD (last 2 path components) ──
+SHORT_CWD=""
+if [[ -n "$CWD" ]]; then
+    SHORT_CWD=$(echo "$CWD" | awk -F/ '{if(NF>=2) print $(NF-1)"/"$NF; else print $NF}')
+fi
+
+# ── Build Slack Block Kit message ──
+# Header section: session name (bold) with focus link
+if [[ -n "$FOCUS_LINK" ]]; then
+    HEADER_TEXT=":white_check_mark:  *<${FOCUS_LINK}|${SESSION_NAME}>*"
+else
+    HEADER_TEXT=":white_check_mark:  *${SESSION_NAME}*"
+fi
+
+# Context line: tab, duration, cwd
+CONTEXT_PARTS=""
+[[ -n "$LOCATION" ]] && CONTEXT_PARTS="${CONTEXT_PARTS}:desktop_computer: ${LOCATION}  "
+CONTEXT_PARTS="${CONTEXT_PARTS}:stopwatch: ${DURATION_DISPLAY}  "
+[[ -n "$SHORT_CWD" ]] && CONTEXT_PARTS="${CONTEXT_PARTS}:file_folder: \`${SHORT_CWD}\`"
+
+# Build blocks JSON
+BLOCKS=$(jq -n \
+    --arg header "$HEADER_TEXT" \
+    --arg context "$CONTEXT_PARTS" \
+    --arg body "$BOTTOM_LINE" \
+    '[
+        {
+            "type": "section",
+            "text": { "type": "mrkdwn", "text": $header }
+        },
+        {
+            "type": "context",
+            "elements": [
+                { "type": "mrkdwn", "text": $context }
+            ]
+        },
+        {
+            "type": "section",
+            "text": { "type": "mrkdwn", "text": $body }
+        }
+    ]')
+
+# Fallback text for notifications/mobile
+FALLBACK_TEXT="${SESSION_NAME} — ${BOTTOM_LINE}"
 
 # ── Send Slack message ──
 if [[ -n "$SLACK_BOT_TOKEN" && "$SLACK_BOT_TOKEN" != "null" ]]; then
@@ -238,11 +293,15 @@ if [[ -n "$SLACK_BOT_TOKEN" && "$SLACK_BOT_TOKEN" != "null" ]]; then
         -H "Content-Type: application/json" \
         -d "$(jq -n \
             --arg channel "$SLACK_CHANNEL" \
-            --arg text "$SLACK_TEXT" \
-            '{channel: $channel, text: $text, unfurl_links: false, unfurl_media: false}')")
+            --arg text "$FALLBACK_TEXT" \
+            --argjson blocks "$BLOCKS" \
+            '{channel: $channel, text: $text, blocks: $blocks, unfurl_links: false, unfurl_media: false}')")
 
     OK=$(echo "$RESPONSE" | jq -r '.ok' 2>/dev/null)
     echo "$(date '+%H:%M:%S') SENT: ok=$OK session=$SESSION_NAME" >&2
+    if [[ "$OK" != "true" ]]; then
+        echo "$(date '+%H:%M:%S') ERROR: $(echo "$RESPONSE" | jq -r '.error // "unknown"' 2>/dev/null)" >&2
+    fi
 
     # Record notification timestamp for rate limiting
     echo "$(date +%s)" > "$LAST_NOTIFIED_FILE"
