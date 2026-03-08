@@ -47,6 +47,12 @@ LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty')
 
 [[ -z "$SESSION_ID" ]] && { echo "$(date '+%H:%M:%S') SKIP: no session_id" >&2; exit 0; }
 
+# ── Suppression: skip when called from automated claude -p subprocesses ──
+if [[ "${CDN_SUPPRESS:-0}" == "1" ]]; then
+    echo "$(date '+%H:%M:%S') SKIP: CDN_SUPPRESS=1 (automated subprocess)" >&2
+    exit 0
+fi
+
 # ── Handle UserPromptSubmit: save our own start timestamp (no race condition) ──
 START_FILE="${SIGNALS_DIR}/${SESSION_ID}.notify-start"
 if [[ "$HOOK_EVENT" == "UserPromptSubmit" ]]; then
@@ -204,28 +210,19 @@ if [[ -z "$RAW_TEXT" && -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
         | tail -1)
 fi
 
-if [[ -n "$RAW_TEXT" ]]; then
-    # Clean text: strip markdown headers, bold, backticks, XML tags, filler lines
+FORMATTER="$(dirname "$0")/format-slack.py"
+if [[ -n "$RAW_TEXT" && -f "$FORMATTER" ]]; then
+    TLDR=$(echo "$RAW_TEXT" | python3 "$FORMATTER" --tldr)
+    FULL_BODY=$(echo "$RAW_TEXT" | python3 "$FORMATTER" --max-lines 8 --max-chars 800)
+elif [[ -n "$RAW_TEXT" ]]; then
+    # Fallback if formatter missing: basic cleanup
     CLEANED=$(echo "$RAW_TEXT" \
         | sed 's/^#\+[[:space:]]*//' \
         | sed 's/\*\*//g' \
         | sed 's/<[^>]*>//g' \
-        | grep -v '^$' \
-        | grep -vi '^\(all done\|here.s the summary\|here.s what\|let me\|i.ll \|done\.\|sure\|okay\|$\)')
-
-    # TLDR: first 2 meaningful lines, 150 chars — for push notifications
-    TLDR=$(echo "$CLEANED" \
-        | sed 's/`//g' \
-        | head -2 \
-        | paste -sd ' ' - \
-        | cut -c1-150)
-
-    # Full body: up to 2900 chars (Slack block text limit is 3000) — for in-app view
-    # Preserve newlines for readable multi-line display in Slack
-    FULL_BODY=$(echo "$CLEANED" \
-        | head -40 \
-        | cut -c1-200)
-    # Trim to 2900 chars total
+        | grep -v '^$')
+    TLDR=$(echo "$CLEANED" | sed 's/`//g' | head -2 | paste -sd ' ' - | cut -c1-150)
+    FULL_BODY=$(echo "$CLEANED" | head -40 | cut -c1-200)
     FULL_BODY="${FULL_BODY:0:2900}"
 fi
 
@@ -263,11 +260,34 @@ if [[ -n "$CWD" ]]; then
 fi
 
 # ── Build Slack Block Kit message ──
+# Context-aware emoji based on session name, TLDR, and working directory
+_SN_LOWER=$(echo "$SESSION_NAME" | tr '[:upper:]' '[:lower:]')
+_TLDR_LOWER=$(echo "$TLDR" | tr '[:upper:]' '[:lower:]')
+_CWD_LOWER=$(echo "$SHORT_CWD" | tr '[:upper:]' '[:lower:]')
+STATUS_EMOJI=":white_check_mark:"
+if echo "$_SN_LOWER $_TLDR_LOWER" | grep -qiE 'deploy|Deploy\.Rpm'; then
+    STATUS_EMOJI=":rocket:"
+elif echo "$_SN_LOWER $_TLDR_LOWER" | grep -qiE 'fix|bug'; then
+    STATUS_EMOJI=":lady_beetle:"
+elif echo "$_SN_LOWER $_TLDR_LOWER" | grep -qiE 'build|PR-[0-9]|monitor'; then
+    STATUS_EMOJI=":building_construction:"
+elif echo "$_TLDR_LOWER" | grep -qiE 'created \*\[|^created.*IT-'; then
+    STATUS_EMOJI=":ticket:"
+elif echo "$_TLDR_LOWER" | grep -qiE 'progress updated|progress file'; then
+    STATUS_EMOJI=":clipboard:"
+elif echo "$_CWD_LOWER" | grep -q 'metal_hobby_app'; then
+    STATUS_EMOJI=":iphone:"
+elif echo "$_CWD_LOWER" | grep -q 'wakelite'; then
+    STATUS_EMOJI=":zap:"
+elif echo "$_CWD_LOWER" | grep -q 'ad-refresh'; then
+    STATUS_EMOJI=":arrows_counterclockwise:"
+fi
+
 # Header section: session name (bold) with focus link
 if [[ -n "$FOCUS_LINK" ]]; then
-    HEADER_TEXT=":white_check_mark:  *<${FOCUS_LINK}|${SESSION_NAME}>*"
+    HEADER_TEXT="${STATUS_EMOJI}  *${SESSION_NAME}*  (<${FOCUS_LINK}|open>)"
 else
-    HEADER_TEXT=":white_check_mark:  *${SESSION_NAME}*"
+    HEADER_TEXT="${STATUS_EMOJI}  *${SESSION_NAME}*"
 fi
 
 # Context line: tab, duration, cwd
@@ -292,6 +312,7 @@ BLOCKS=$(jq -n \
                 { "type": "mrkdwn", "text": $context }
             ]
         },
+        { "type": "divider" },
         {
             "type": "section",
             "text": { "type": "mrkdwn", "text": $body }
