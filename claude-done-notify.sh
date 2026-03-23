@@ -113,20 +113,30 @@ if [[ "$TERMINAL_MODE" == "auto" ]]; then
 fi
 
 if [[ "$TERMINAL_MODE" == "wezterm" ]]; then
-    MY_TTY=$(ps -o tty= -p "$PPID" 2>/dev/null | tr -d ' ')
-    if [[ -n "$MY_TTY" ]]; then
-        PANE_JSON=$(wezterm cli list --format json 2>/dev/null || echo "[]")
-        MY_PANE_ID=$(echo "$PANE_JSON" | jq -r --arg tty "/dev/$MY_TTY" \
-            '.[] | select(.tty_name == $tty) | .pane_id' 2>/dev/null || echo "")
-        PANE_TITLE=$(echo "$PANE_JSON" | jq -r --arg tty "/dev/$MY_TTY" \
-            '.[] | select(.tty_name == $tty) | .title' 2>/dev/null || echo "")
-        MY_TAB_ID=$(echo "$PANE_JSON" | jq -r --arg tty "/dev/$MY_TTY" \
-            '.[] | select(.tty_name == $tty) | .tab_id' 2>/dev/null || echo "")
-        if [[ -n "$MY_TAB_ID" ]]; then
-            TAB_NUMBER=$(echo "$PANE_JSON" | jq -r '[.[].tab_id] | unique | sort | to_entries[] | select(.value == '"$MY_TAB_ID"') | .key + 1' 2>/dev/null || echo "")
+    PANE_JSON=$(wezterm cli list --format json 2>/dev/null || echo "[]")
+    # Prefer WEZTERM_PANE env var (works through PTY proxies like claude-chill)
+    # Fall back to PPID→TTY matching for non-proxy setups
+    if [[ -n "$WEZTERM_PANE" ]]; then
+        MY_PANE_ID="$WEZTERM_PANE"
+        PANE_TITLE=$(echo "$PANE_JSON" | jq -r --argjson pid "$MY_PANE_ID" \
+            '.[] | select(.pane_id == $pid) | .title' 2>/dev/null || echo "")
+        MY_TAB_ID=$(echo "$PANE_JSON" | jq -r --argjson pid "$MY_PANE_ID" \
+            '.[] | select(.pane_id == $pid) | .tab_id' 2>/dev/null || echo "")
+    else
+        MY_TTY=$(ps -o tty= -p "$PPID" 2>/dev/null | tr -d ' ')
+        if [[ -n "$MY_TTY" ]]; then
+            MY_PANE_ID=$(echo "$PANE_JSON" | jq -r --arg tty "/dev/$MY_TTY" \
+                '.[] | select(.tty_name == $tty) | .pane_id' 2>/dev/null || echo "")
+            PANE_TITLE=$(echo "$PANE_JSON" | jq -r --arg tty "/dev/$MY_TTY" \
+                '.[] | select(.tty_name == $tty) | .title' 2>/dev/null || echo "")
+            MY_TAB_ID=$(echo "$PANE_JSON" | jq -r --arg tty "/dev/$MY_TTY" \
+                '.[] | select(.tty_name == $tty) | .tab_id' 2>/dev/null || echo "")
         fi
-        echo "$(date '+%H:%M:%S') PANE: tty=$MY_TTY pane=$MY_PANE_ID tab=$TAB_NUMBER title=$PANE_TITLE" >&2
     fi
+    if [[ -n "$MY_TAB_ID" ]]; then
+        TAB_NUMBER=$(echo "$PANE_JSON" | jq -r '[.[].tab_id] | unique | sort | to_entries[] | select(.value == '"$MY_TAB_ID"') | .key + 1' 2>/dev/null || echo "")
+    fi
+    echo "$(date '+%H:%M:%S') PANE: pane=$MY_PANE_ID tab=$TAB_NUMBER title=$PANE_TITLE (src=${WEZTERM_PANE:+env}${WEZTERM_PANE:-tty})" >&2
 fi
 
 # Check if user is looking at THIS session's terminal pane (macOS only)
@@ -283,9 +293,9 @@ elif echo "$_CWD_LOWER" | grep -q 'ad-refresh'; then
     STATUS_EMOJI=":arrows_counterclockwise:"
 fi
 
-# Header section: session name (bold) with focus link
+# Header section: session name as clickable link (or bold if no link)
 if [[ -n "$FOCUS_LINK" ]]; then
-    HEADER_TEXT="${STATUS_EMOJI}  *${SESSION_NAME}*  (<${FOCUS_LINK}|open>)"
+    HEADER_TEXT="${STATUS_EMOJI}  <${FOCUS_LINK}|${SESSION_NAME}>"
 else
     HEADER_TEXT="${STATUS_EMOJI}  *${SESSION_NAME}*"
 fi

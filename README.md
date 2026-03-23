@@ -12,7 +12,7 @@ A [Claude Code hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that 
 
 ### Features
 
-- **Smart focus detection** (macOS + WezTerm): skips the notification if you're looking at the exact terminal pane where Claude is running
+- **Smart focus detection** (macOS + WezTerm): skips the notification if you're looking at the exact terminal pane where Claude is running. Works through PTY proxies like [claude-chill](https://github.com/nickarella/claude-chill)
 - **Rate limiting**: max one notification per 60s per session (configurable)
 - **Session context**: message includes the session name and a summary of Claude's response
 - **Minimal dependencies**: bash, curl, jq
@@ -129,6 +129,7 @@ Duration gate → Rate limit → Focus delay → Focus detection → Send
 ### Focus detection
 
 On **macOS with WezTerm**, the hook does pane-level detection:
+- Prefers the `WEZTERM_PANE` env var for pane identification (reliable through PTY proxies like claude-chill), falls back to PPID→TTY matching
 - Uses `osascript` to check which app is frontmost
 - If WezTerm is focused, uses `wezterm cli list` + `list-clients` to check if the user is on the exact pane running this session
 - Notifies if WezTerm is focused but on a *different* tab/pane
@@ -178,6 +179,11 @@ curl -s -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
 **Getting notified even when looking at terminal:**
 - Check `CDN_TERMINAL` setting — try `wezterm` explicitly if using WezTerm
 - The debug log shows focus detection decisions (look for `FOCUS:` and `SKIP:` lines)
+
+**Pane detection fails (no focus link, "Claude session" fallback):**
+- If using a PTY proxy like claude-chill, verify `WEZTERM_PANE` is inherited: `echo $WEZTERM_PANE`
+- The debug log shows `(src=env)` when using the env var, `(src=tty)` when using PPID→TTY matching
+- If `WEZTERM_PANE` is empty, the proxy may not be forwarding the env var
 
 ## Creating a Slack bot
 
