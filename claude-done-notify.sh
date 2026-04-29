@@ -53,10 +53,62 @@ if [[ "${CDN_SUPPRESS:-0}" == "1" ]]; then
     exit 0
 fi
 
-# ── Handle UserPromptSubmit: save our own start timestamp (no race condition) ──
+# ── Handle UserPromptSubmit: save start timestamp + Ghostty tab info ──
 START_FILE="${SIGNALS_DIR}/${SESSION_ID}.notify-start"
+TAB_INFO_FILE="${SIGNALS_DIR}/${SESSION_ID}.tab-info"
 if [[ "$HOOK_EVENT" == "UserPromptSubmit" ]]; then
     date +%s > "$START_FILE"
+    # For Ghostty: save the real tab info NOW (before Stop hooks overwrite the title).
+    # Uses TTY probe to find the correct terminal even if GHOSTTY_TERMINAL_ID is stale.
+    if [[ -n "$GHOSTTY_TERMINAL_ID" ]]; then
+        _WALK_PID=$PPID; _REAL_TTY=""
+        for _i in 1 2 3 4 5 6; do
+            _INFO=$(ps -o pid=,ppid=,tty= -p $_WALK_PID 2>/dev/null | head -1)
+            _TTY=$(echo "$_INFO" | awk '{print $3}')
+            if [[ "$_TTY" != "??" && -n "$_TTY" ]]; then _REAL_TTY="$_TTY"; break; fi
+            _WALK_PID=$(echo "$_INFO" | awk '{print $2}')
+            [[ -z "$_WALK_PID" || "$_WALK_PID" == "0" ]] && break
+        done
+        if [[ -n "$_REAL_TTY" && -w "/dev/$_REAL_TTY" ]]; then
+            _ALL=$(osascript -e '
+                tell application "Ghostty"
+                    set output to ""
+                    repeat with w in every window
+                        repeat with t in every tab of w
+                            repeat with trm in every terminal of t
+                                set output to output & id of trm & "|" & index of t & "|" & name of t & linefeed
+                            end repeat
+                        end repeat
+                    end repeat
+                    return output
+                end tell
+            ' 2>/dev/null || echo "")
+            _PROBE="__CDN_${RANDOM}_$$__"
+            echo -ne "\033]2;${_PROBE}\007" > "/dev/$_REAL_TTY" 2>/dev/null
+            sleep 0.15
+            _FOUND_ID=$(osascript -e '
+                tell application "Ghostty"
+                    repeat with w in every window
+                        repeat with t in every tab of w
+                            repeat with trm in every terminal of t
+                                if name of trm contains "'"$_PROBE"'" then return id of trm as text
+                            end repeat
+                        end repeat
+                    end repeat
+                    return ""
+                end tell
+            ' 2>/dev/null || echo "")
+            if [[ -n "$_FOUND_ID" ]]; then
+                _LINE=$(echo "$_ALL" | grep "^${_FOUND_ID}|" | head -1)
+                echo "${_FOUND_ID}|$(echo "$_LINE" | cut -d'|' -f2)|$(echo "$_LINE" | cut -d'|' -f3-)" > "$TAB_INFO_FILE"
+                # Restore original title
+                _ORIG_TITLE=$(echo "$_LINE" | cut -d'|' -f3-)
+                echo -ne "\033]2;${_ORIG_TITLE}\007" > "/dev/$_REAL_TTY" 2>/dev/null
+            else
+                echo -ne "\033]2;\007" > "/dev/$_REAL_TTY" 2>/dev/null
+            fi
+        fi
+    fi
     exit 0
 fi
 
@@ -109,7 +161,13 @@ TAB_NUMBER=""
 
 TERMINAL_MODE="${CDN_TERMINAL:-auto}"
 if [[ "$TERMINAL_MODE" == "auto" ]]; then
-    command -v wezterm &>/dev/null && TERMINAL_MODE="wezterm" || TERMINAL_MODE="generic"
+    if [[ -n "$GHOSTTY_TERMINAL_ID" ]]; then
+        TERMINAL_MODE="ghostty"
+    elif command -v wezterm &>/dev/null; then
+        TERMINAL_MODE="wezterm"
+    else
+        TERMINAL_MODE="generic"
+    fi
 fi
 
 if [[ "$TERMINAL_MODE" == "wezterm" ]]; then
@@ -139,11 +197,75 @@ if [[ "$TERMINAL_MODE" == "wezterm" ]]; then
     echo "$(date '+%H:%M:%S') PANE: pane=$MY_PANE_ID tab=$TAB_NUMBER title=$PANE_TITLE (src=${WEZTERM_PANE:+env}${WEZTERM_PANE:-tty})" >&2
 fi
 
+if [[ "$TERMINAL_MODE" == "ghostty" ]]; then
+    # Read tab info cached during UserPromptSubmit (before Stop hooks overwrite the title).
+    # Format: terminal_id|tab_index|tab_title
+    TAB_INFO_FILE="${SIGNALS_DIR}/${SESSION_ID}.tab-info"
+    MY_PANE_ID="$GHOSTTY_TERMINAL_ID"
+    if [[ -f "$TAB_INFO_FILE" ]]; then
+        _CACHED=$(cat "$TAB_INFO_FILE")
+        MY_PANE_ID=$(echo "$_CACHED" | cut -d'|' -f1)
+        TAB_NUMBER=$(echo "$_CACHED" | cut -d'|' -f2)
+        PANE_TITLE=$(echo "$_CACHED" | cut -d'|' -f3-)
+    fi
+    # Refresh tab index at Stop time (may have shifted since UserPromptSubmit)
+    _FRESH_IDX=$(osascript -e '
+        tell application "Ghostty"
+            repeat with w in every window
+                repeat with t in every tab of w
+                    repeat with trm in every terminal of t
+                        if id of trm is "'"$MY_PANE_ID"'" then return index of t as text
+                    end repeat
+                end repeat
+            end repeat
+            return ""
+        end tell
+    ' 2>/dev/null || echo "")
+    if [[ -n "$_FRESH_IDX" ]]; then
+        TAB_NUMBER="$_FRESH_IDX"
+    fi
+    echo "$(date '+%H:%M:%S') PANE: terminal_id=$MY_PANE_ID tab=$TAB_NUMBER title=$PANE_TITLE (ghostty, fresh idx)" >&2
+fi
+
 # Check if user is looking at THIS session's terminal pane (macOS only)
 if command -v osascript &>/dev/null; then
     FRONTMOST=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null || echo "unknown")
 
-    if [[ "$FRONTMOST" == "wezterm-gui" && "$TERMINAL_MODE" == "wezterm" ]]; then
+    if [[ "$FRONTMOST" == "ghostty" && "$TERMINAL_MODE" == "ghostty" ]]; then
+        if [[ -n "$MY_PANE_ID" ]]; then
+            # Check if the tab containing our terminal is the selected tab.
+            # We check tab-level (not terminal-level) because GHOSTTY_TERMINAL_ID
+            # can be stale if a session was resumed in a different tab.
+            MY_TAB_SELECTED=$(osascript -e '
+                tell application "Ghostty"
+                    set targetID to "'"$MY_PANE_ID"'"
+                    set fw to front window
+                    repeat with t in every tab of fw
+                        repeat with trm in every terminal of t
+                            if id of trm is targetID then
+                                return selected of t as text
+                            end if
+                        end repeat
+                    end repeat
+                    return "not_found"
+                end tell
+            ' 2>/dev/null || echo "error")
+            echo "$(date '+%H:%M:%S') FOCUS: my_terminal=$MY_PANE_ID tab_selected=$MY_TAB_SELECTED" >&2
+            if [[ "$MY_TAB_SELECTED" == "true" ]]; then
+                echo "$(date '+%H:%M:%S') SKIP: user is on the tab containing this session" >&2
+                exit 0
+            fi
+            if [[ "$MY_TAB_SELECTED" == "not_found" ]]; then
+                # Terminal ID not found in any tab — likely stale env var.
+                # Fall back: check if ANY Claude tab is selected (conservative skip)
+                echo "$(date '+%H:%M:%S') WARN: terminal $MY_PANE_ID not found in any tab (stale env?)" >&2
+            fi
+            echo "$(date '+%H:%M:%S') PASS: ghostty focused but different tab" >&2
+        else
+            echo "$(date '+%H:%M:%S') SKIP: ghostty focused, can't determine terminal" >&2
+            exit 0
+        fi
+    elif [[ "$FRONTMOST" == "wezterm-gui" && "$TERMINAL_MODE" == "wezterm" ]]; then
         if [[ -n "$MY_PANE_ID" ]]; then
             FOCUSED_PANE=$(wezterm cli list-clients --format json 2>/dev/null \
                 | jq -r '.[0].focused_pane_id // empty' 2>/dev/null || echo "")
@@ -157,7 +279,7 @@ if command -v osascript &>/dev/null; then
             echo "$(date '+%H:%M:%S') SKIP: wezterm focused, can't determine pane" >&2
             exit 0
         fi
-    elif echo "$FRONTMOST" | grep -qi "terminal\|iterm\|alacritty\|kitty\|wezterm"; then
+    elif echo "$FRONTMOST" | grep -qi "terminal\|iterm\|alacritty\|kitty\|wezterm\|ghostty"; then
         # Generic terminal detection — if ANY terminal is focused, skip
         # (can't do pane-level detection for non-WezTerm terminals)
         echo "$(date '+%H:%M:%S') SKIP: terminal app focused ($FRONTMOST)" >&2
@@ -249,8 +371,12 @@ fi
 
 # ── Build WezTerm focus link ──
 FOCUS_LINK=""
-FOCUS_PORT="${CDN_FOCUS_PORT:-17380}"
 if [[ -n "$MY_PANE_ID" ]]; then
+    if [[ "$TERMINAL_MODE" == "ghostty" ]]; then
+        FOCUS_PORT="${CDN_GHOSTTY_FOCUS_PORT:-17381}"
+    else
+        FOCUS_PORT="${CDN_FOCUS_PORT:-17380}"
+    fi
     FOCUS_LINK="http://127.0.0.1:${FOCUS_PORT}/focus?pane=${MY_PANE_ID}"
 fi
 
@@ -332,19 +458,153 @@ BLOCKS=$(jq -n \
 # Fallback text for push notifications / mobile (short TLDR)
 FALLBACK_TEXT="${SESSION_NAME} — ${TLDR}"
 
-# ── Send Slack message ──
-if [[ -n "$SLACK_BOT_TOKEN" && "$SLACK_BOT_TOKEN" != "null" ]]; then
-    RESPONSE=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
+# ── Per-tab-per-day thread support ──
+# Each terminal tab gets its own Slack thread per day.
+# Thread key: terminal_id (Ghostty/WezTerm) or SESSION_ID (fallback).
+# Parent message updates via chat.update when session name or tab index changes.
+# Set CDN_SESSION_THREAD=0 in ~/.claude-done-notify.env to disable.
+SESSION_THREAD_ENABLED="${CDN_SESSION_THREAD:-1}"
+SIGNAL_HUB_DIR="${HOME}/.signal-hub"
+
+# Determine stable thread key: terminal ID > pane ID > session ID
+THREAD_KEY=""
+if [[ -n "$MY_PANE_ID" ]]; then
+    THREAD_KEY="$MY_PANE_ID"
+else
+    THREAD_KEY="$SESSION_ID"
+fi
+
+# Helper: consistent emoji from THREAD_KEY (stable across /clear)
+_thread_emoji() {
+    local emojis hash_val c
+    emojis=(🔵 🟢 🟠 🟣 🔴 🟡 ⚪ 🟤 💠 🔷 🔶 💎 🧊 🌀 🎯 🪐 🌸 🍀 🔥 ⚡ 🌊 🎪 🧿 🪩 🎲 🧩 🎭 🪄 🎸 🪘)
+    hash_val=0
+    for (( i=0; i<${#THREAD_KEY}; i++ )); do
+        printf -v c '%d' "'${THREAD_KEY:$i:1}"
+        hash_val=$(( (hash_val * 31 + c) % ${#emojis[@]} ))
+    done
+    echo "${emojis[$hash_val]}"
+}
+
+# Helper: build parent text from current state
+_thread_parent_text() {
+    local emoji tab_label
+    emoji=$(_thread_emoji)
+    if [[ -n "$TAB_NUMBER" ]]; then
+        tab_label="Tab ${TAB_NUMBER} — "
+    else
+        tab_label=""
+    fi
+    echo "${emoji} ${tab_label}${SESSION_NAME}"
+}
+
+get_tab_thread_ts() {
+    local today cache_file
+    today=$(date +%Y-%m-%d)
+    cache_file="${SIGNAL_HUB_DIR}/thread_${THREAD_KEY}_${today}.json"
+    mkdir -p "$SIGNAL_HUB_DIR"
+
+    # If thread exists for this tab today, check for drift and return ts
+    if [[ -f "$cache_file" ]]; then
+        local cached_ts cached_name cached_idx
+        cached_ts=$(jq -r '.ts // empty' "$cache_file" 2>/dev/null)
+        cached_name=$(jq -r '.name // empty' "$cache_file" 2>/dev/null)
+        cached_idx=$(jq -r '.tab_index // empty' "$cache_file" 2>/dev/null)
+
+        if [[ -n "$cached_ts" ]]; then
+            # Detect drift: session name or tab index changed since last notification
+            local drifted=0
+            if [[ "$SESSION_NAME" != "$cached_name" ]]; then
+                echo "$(date '+%H:%M:%S') THREAD: name drifted: '$cached_name' → '$SESSION_NAME'" >&2
+                drifted=1
+            fi
+            if [[ -n "$TAB_NUMBER" && "$TAB_NUMBER" != "$cached_idx" ]]; then
+                echo "$(date '+%H:%M:%S') THREAD: tab drifted: $cached_idx → $TAB_NUMBER" >&2
+                drifted=1
+            fi
+
+            if [[ "$drifted" == "1" ]]; then
+                local updated_text update_response update_ok
+                updated_text=$(_thread_parent_text)
+
+                update_response=$(curl -s -X POST "https://slack.com/api/chat.update" \
+                    -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+                    -H "Content-Type: application/json" \
+                    -d "$(jq -n \
+                        --arg channel "$SLACK_CHANNEL" \
+                        --arg ts "$cached_ts" \
+                        --arg text "$updated_text" \
+                        '{channel: $channel, ts: $ts, text: $text}')")
+                update_ok=$(echo "$update_response" | jq -r '.ok' 2>/dev/null)
+                echo "$(date '+%H:%M:%S') THREAD: parent updated ok=$update_ok ('$updated_text')" >&2
+
+                # Persist new metadata
+                jq -n \
+                    --arg ts "$cached_ts" \
+                    --arg name "$SESSION_NAME" \
+                    --arg tab_index "${TAB_NUMBER:-}" \
+                    '{ts: $ts, name: $name, tab_index: $tab_index}' > "$cache_file"
+            fi
+
+            echo "$cached_ts"
+            return 0
+        fi
+    fi
+
+    # No thread for this tab today — create parent message
+    local parent_text parent_response parent_ts
+    parent_text=$(_thread_parent_text)
+
+    parent_response=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
         -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
         -H "Content-Type: application/json" \
         -d "$(jq -n \
             --arg channel "$SLACK_CHANNEL" \
-            --arg text "$FALLBACK_TEXT" \
-            --argjson blocks "$BLOCKS" \
-            '{channel: $channel, text: $text, blocks: $blocks, unfurl_links: false, unfurl_media: false}')")
+            --arg text "$parent_text" \
+            '{channel: $channel, text: $text, unfurl_links: false}')")
+
+    parent_ts=$(echo "$parent_response" | jq -r '.ts // empty' 2>/dev/null)
+    if [[ -n "$parent_ts" ]]; then
+        jq -n \
+            --arg ts "$parent_ts" \
+            --arg name "$SESSION_NAME" \
+            --arg tab_index "${TAB_NUMBER:-}" \
+            '{ts: $ts, name: $name, tab_index: $tab_index}' > "$cache_file"
+        echo "$(date '+%H:%M:%S') THREAD: created thread $parent_ts for $THREAD_KEY ($SESSION_NAME) on $today" >&2
+        echo "$parent_ts"
+        return 0
+    else
+        echo "$(date '+%H:%M:%S') THREAD: failed: $(echo "$parent_response" | jq -r '.error // "unknown"')" >&2
+        return 1
+    fi
+}
+
+THREAD_TS=""
+if [[ "$SESSION_THREAD_ENABLED" == "1" ]]; then
+    THREAD_TS=$(get_tab_thread_ts) || THREAD_TS=""
+    echo "$(date '+%H:%M:%S') THREAD: key=$THREAD_KEY ts=$THREAD_TS" >&2
+fi
+
+# ── Send Slack message ──
+if [[ -n "$SLACK_BOT_TOKEN" && "$SLACK_BOT_TOKEN" != "null" ]]; then
+    PAYLOAD=$(jq -n \
+        --arg channel "$SLACK_CHANNEL" \
+        --arg text "$FALLBACK_TEXT" \
+        --argjson blocks "$BLOCKS" \
+        --arg thread_ts "$THREAD_TS" \
+        'if $thread_ts != "" then
+            {channel: $channel, text: $text, blocks: $blocks, thread_ts: $thread_ts, unfurl_links: false, unfurl_media: false}
+        else
+            {channel: $channel, text: $text, blocks: $blocks, unfurl_links: false, unfurl_media: false}
+        end')
+
+    RESPONSE=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
+        -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "$PAYLOAD")
 
     OK=$(echo "$RESPONSE" | jq -r '.ok' 2>/dev/null)
-    echo "$(date '+%H:%M:%S') SENT: ok=$OK session=$SESSION_NAME" >&2
+    echo "$(date '+%H:%M:%S') SENT: ok=$OK session=$SESSION_NAME thread=$THREAD_TS" >&2
     if [[ "$OK" != "true" ]]; then
         echo "$(date '+%H:%M:%S') ERROR: $(echo "$RESPONSE" | jq -r '.error // "unknown"' 2>/dev/null)" >&2
     fi
