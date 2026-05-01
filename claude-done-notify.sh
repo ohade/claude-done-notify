@@ -35,6 +35,73 @@ FOCUS_DELAY="${CDN_FOCUS_DELAY:-2}"
 
 mkdir -p "$SIGNALS_DIR"
 
+# ── Terminal helpers (CC-97) ──
+# Pure functions — no I/O beyond reading env + token file. Single source of truth
+# for the cmux > ghostty > wezterm > generic precedence (mirrors
+# ~/.claude/hooks/lib/terminal_identity.sh). The cmux dispatch row is inert
+# until CC-64D adds the runtime detection block.
+
+# detect_terminal_mode: echoes one of cmux | ghostty | wezterm | generic.
+# Honors $CDN_TERMINAL override (any value other than "auto" is returned verbatim).
+# Reads: CDN_TERMINAL, CMUX_SURFACE_ID, CMUX_PANEL_ID, GHOSTTY_TERMINAL_ID, PATH (for wezterm).
+detect_terminal_mode() {
+    if [[ -n "${CDN_TERMINAL:-}" && "${CDN_TERMINAL}" != "auto" ]]; then
+        echo "$CDN_TERMINAL"
+        return 0
+    fi
+    if [[ -n "${CMUX_SURFACE_ID:-}" || -n "${CMUX_PANEL_ID:-}" ]]; then
+        echo "cmux"
+    elif [[ -n "${GHOSTTY_TERMINAL_ID:-}" ]]; then
+        echo "ghostty"
+    elif command -v wezterm &>/dev/null; then
+        echo "wezterm"
+    else
+        echo "generic"
+    fi
+}
+
+# build_focus_link: echoes a focus URL or empty string. Empty if id is missing,
+# terminal type is unknown/generic, or required cmux preconditions are unmet.
+# Args:
+#   $1 terminal_type — cmux | ghostty | wezterm | generic | <other>
+#   $2 id            — pane id (wezterm), terminal id (ghostty), surface id (cmux)
+#   $3 extra         — workspace id (cmux only); ignored for other types
+# Reads: CDN_FOCUS_PORT (wezterm, default 17380), CDN_GHOSTTY_FOCUS_PORT (default 17381),
+#        CDN_CMUX_FOCUS_PORT (default 17382), CDN_CMUX_FOCUS_TOKEN_FILE (default ~/.cmux-focus-token).
+build_focus_link() {
+    local terminal_type="$1"
+    local id="$2"
+    local extra="${3:-}"
+    [[ -z "$id" ]] && { echo ""; return 0; }
+
+    case "$terminal_type" in
+        cmux)
+            local port="${CDN_CMUX_FOCUS_PORT:-17382}"
+            local token_file="${CDN_CMUX_FOCUS_TOKEN_FILE:-${HOME}/.cmux-focus-token}"
+            local token=""
+            [[ -f "$token_file" ]] && token=$(cat "$token_file" 2>/dev/null)
+            # CC-64D delivers cmux runtime block; until then, missing token or
+            # workspace → empty link (no focus, but Slack message still sent).
+            if [[ -n "$token" && -n "$extra" ]]; then
+                echo "http://127.0.0.1:${port}/focus?token=${token}&workspace=${extra}&surface=${id}"
+            else
+                echo ""
+            fi
+            ;;
+        ghostty)
+            local port="${CDN_GHOSTTY_FOCUS_PORT:-17381}"
+            echo "http://127.0.0.1:${port}/focus?pane=${id}"
+            ;;
+        wezterm)
+            local port="${CDN_FOCUS_PORT:-17380}"
+            echo "http://127.0.0.1:${port}/focus?pane=${id}"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
 # ── Read hook input from stdin ──
 INPUT=$(cat)
 echo "$(date '+%H:%M:%S') INPUT=$(echo "$INPUT" | jq -c '.' 2>/dev/null || echo 'parse-error')" >&2
@@ -159,16 +226,8 @@ PANE_TITLE=""
 MY_PANE_ID=""
 TAB_NUMBER=""
 
-TERMINAL_MODE="${CDN_TERMINAL:-auto}"
-if [[ "$TERMINAL_MODE" == "auto" ]]; then
-    if [[ -n "$GHOSTTY_TERMINAL_ID" ]]; then
-        TERMINAL_MODE="ghostty"
-    elif command -v wezterm &>/dev/null; then
-        TERMINAL_MODE="wezterm"
-    else
-        TERMINAL_MODE="generic"
-    fi
-fi
+# CC-97: terminal-mode detection lives in detect_terminal_mode() (top of file).
+TERMINAL_MODE=$(detect_terminal_mode)
 
 if [[ "$TERMINAL_MODE" == "wezterm" ]]; then
     PANE_JSON=$(wezterm cli list --format json 2>/dev/null || echo "[]")
@@ -369,16 +428,10 @@ else
     DURATION_DISPLAY="${DURATION}s"
 fi
 
-# ── Build WezTerm focus link ──
-FOCUS_LINK=""
-if [[ -n "$MY_PANE_ID" ]]; then
-    if [[ "$TERMINAL_MODE" == "ghostty" ]]; then
-        FOCUS_PORT="${CDN_GHOSTTY_FOCUS_PORT:-17381}"
-    else
-        FOCUS_PORT="${CDN_FOCUS_PORT:-17380}"
-    fi
-    FOCUS_LINK="http://127.0.0.1:${FOCUS_PORT}/focus?pane=${MY_PANE_ID}"
-fi
+# ── Build focus link (CC-97: dispatched via build_focus_link helper) ──
+# cmux dispatch row is inert until CC-64D adds the runtime detection block
+# (which will populate $MY_WORKSPACE_ID alongside $MY_PANE_ID = surface_id).
+FOCUS_LINK=$(build_focus_link "$TERMINAL_MODE" "$MY_PANE_ID" "${MY_WORKSPACE_ID:-}")
 
 # ── Build location line ──
 LOCATION=""
