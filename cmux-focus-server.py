@@ -13,6 +13,7 @@ import http.server
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -30,9 +31,41 @@ CMUX_PATHS = (
 
 
 def read_token():
+    """Read the focus token, refusing to use it if file permissions are too open.
+
+    Defense-in-depth against the audit finding that a chmod 644 (whether from
+    operator error, dotfile sync, or backup restore) would silently expose the
+    token to other local users. We refuse rather than auto-fix, so the operator
+    sees the failure in cmux-focus.err.log.
+    """
+    try:
+        st = TOKEN_FILE.stat()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        sys.stderr.write(f"WARN: cannot stat {TOKEN_FILE}: {exc}\n")
+        sys.stderr.flush()
+        return ""
+    if st.st_uid != os.getuid():
+        sys.stderr.write(
+            f"WARN: refusing to read {TOKEN_FILE}: not owned by uid {os.getuid()} "
+            f"(owner uid={st.st_uid})\n"
+        )
+        sys.stderr.flush()
+        return ""
+    perm_bits = stat.S_IMODE(st.st_mode)
+    if perm_bits & 0o077:
+        sys.stderr.write(
+            f"WARN: refusing to read {TOKEN_FILE}: mode {oct(perm_bits)} too "
+            f"permissive (must be 0o600). Run `chmod 600 {TOKEN_FILE}`.\n"
+        )
+        sys.stderr.flush()
+        return ""
     try:
         return TOKEN_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
+    except OSError as exc:
+        sys.stderr.write(f"WARN: read {TOKEN_FILE} failed: {exc}\n")
+        sys.stderr.flush()
         return ""
 
 

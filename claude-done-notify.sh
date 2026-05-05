@@ -76,12 +76,20 @@ build_focus_link() {
 
     case "$terminal_type" in
         cmux)
+            # CMUX_FOCUS_DISABLE=1 kill switch (CC-95 audit fix).
+            # Per-invocation opt-out without unloading the LaunchAgent or
+            # removing the token file. Slack message is still sent, just
+            # without the focus URL — same behavior as missing token.
+            if [[ "${CMUX_FOCUS_DISABLE:-0}" == "1" ]]; then
+                echo ""
+                return 0
+            fi
             local port="${CDN_CMUX_FOCUS_PORT:-17382}"
             local token_file="${CDN_CMUX_FOCUS_TOKEN_FILE:-${HOME}/.cmux-focus-token}"
             local token=""
             [[ -f "$token_file" ]] && token=$(cat "$token_file" 2>/dev/null)
-            # CC-64D delivers cmux runtime block; until then, missing token or
-            # workspace → empty link (no focus, but Slack message still sent).
+            # Missing token or workspace → empty link (no focus, but Slack
+            # message still sent).
             if [[ -n "$token" && -n "$extra" ]]; then
                 echo "http://127.0.0.1:${port}/focus?token=${token}&workspace=${extra}&surface=${id}"
             else
@@ -564,9 +572,16 @@ FALLBACK_TEXT="${SESSION_NAME} — ${TLDR}"
 SESSION_THREAD_ENABLED="${CDN_SESSION_THREAD:-1}"
 SIGNAL_HUB_DIR="${HOME}/.signal-hub"
 
-# Determine stable thread key: terminal ID > pane ID > session ID
+# Determine stable thread key.
+# cmux: workspace+surface+session-scoped key (CC-95 audit fix). Two cmux sessions
+#   that happen to share a surface_id would otherwise collide into one Slack
+#   thread; the workspace prefix and session_id suffix make collisions impossible.
+# ghostty/wezterm: terminal/pane id (one thread per terminal tab, day-scoped).
+# fallback: session_id alone.
 THREAD_KEY=""
-if [[ -n "$MY_PANE_ID" ]]; then
+if [[ "$TERMINAL_MODE" == "cmux" && -n "$MY_WORKSPACE_ID" && -n "$MY_PANE_ID" ]]; then
+    THREAD_KEY="cmux:${MY_WORKSPACE_ID}:${MY_PANE_ID}:${SESSION_ID}"
+elif [[ -n "$MY_PANE_ID" ]]; then
     THREAD_KEY="$MY_PANE_ID"
 else
     THREAD_KEY="$SESSION_ID"

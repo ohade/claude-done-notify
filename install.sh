@@ -41,23 +41,54 @@ EOF
 fi
 
 # ── Step 1b: cmux focus token bootstrap (CC-64D) ──
+# Race-free creation: write inside a (umask 077) subshell so the file is never
+# group/world-readable, even briefly. Then unconditionally re-assert chmod 600
+# so existing tokens with wrong perms are corrected on every install run.
 TOKEN_FILE="${HOME}/.cmux-focus-token"
 if [[ ! -f "$TOKEN_FILE" ]]; then
     if command -v openssl &>/dev/null; then
-        openssl rand -hex 32 > "$TOKEN_FILE"
+        ( umask 077 && openssl rand -hex 32 > "$TOKEN_FILE" )
     else
         # Fallback for systems without openssl — /dev/urandom is universally available.
-        head -c 32 /dev/urandom | xxd -p -c 64 > "$TOKEN_FILE"
+        ( umask 077 && head -c 32 /dev/urandom | xxd -p -c 64 > "$TOKEN_FILE" )
     fi
-    chmod 600 "$TOKEN_FILE"
     echo "Wrote $TOKEN_FILE (cmux focus token, permissions: 600)"
 else
     echo "cmux focus token already exists: $TOKEN_FILE (kept)"
 fi
+# Always chmod 600 — covers existing tokens with corrupted perms (CC-95 audit fix).
+chmod 600 "$TOKEN_FILE"
 
 # ── Step 2: Ensure directories ──
 mkdir -p "$SIGNALS_DIR"
 echo "Ensured signals directory: $SIGNALS_DIR"
+
+# Hook log directory used by the cmux focus LaunchAgent (CC-95 audit fix:
+# launchd silently drops StandardOut/Error if the directory does not exist).
+HOOKS_LOG_DIR="${HOME}/.claude/hooks"
+mkdir -p "$HOOKS_LOG_DIR"
+echo "Ensured hooks log directory: $HOOKS_LOG_DIR"
+
+# ── Step 2b: Render cmux focus LaunchAgent plist from template (CC-95 audit fix) ──
+# The template carries placeholders so the plist works for any user/checkout
+# layout instead of hardcoding /Users/ohad.e/... — that hardcode produced a
+# permanent crash-loop for any other user, with KeepAlive=true respawning every
+# 5s. We also detect python3 dynamically (no hardcoded /usr/bin/python3) and
+# install.sh writes the rendered plist directly to ~/Library/LaunchAgents.
+PLIST_TEMPLATE="${SCRIPT_DIR}/com.ohad.cmux-focus.plist.template"
+PLIST_TARGET="${HOME}/Library/LaunchAgents/com.ohad.cmux-focus.plist"
+if [[ -f "$PLIST_TEMPLATE" ]]; then
+    PYTHON_BIN=$(command -v python3 || echo "/usr/bin/python3")
+    mkdir -p "${HOME}/Library/LaunchAgents"
+    sed \
+        -e "s|__PYTHON__|${PYTHON_BIN}|g" \
+        -e "s|__SCRIPT_DIR__|${SCRIPT_DIR}|g" \
+        -e "s|__LOG_DIR__|${HOOKS_LOG_DIR}|g" \
+        "$PLIST_TEMPLATE" > "$PLIST_TARGET"
+    echo "Rendered LaunchAgent plist: $PLIST_TARGET"
+    echo "  python: $PYTHON_BIN"
+    echo "  script: ${SCRIPT_DIR}/cmux-focus-server.py"
+fi
 
 # ── Step 3: Make hook executable ──
 chmod +x "$HOOK_PATH"
@@ -100,6 +131,7 @@ echo "Done! Start a new Claude Code session to test."
 echo "Debug log: ~/.claude/hooks/debug-claude-done-notify.log"
 echo
 echo "── cmux focus server (CC-64D) ──"
-echo "Install plist: cp \"${SCRIPT_DIR}/com.ohad.cmux-focus.plist\" ~/Library/LaunchAgents/com.ohad.cmux-focus.plist"
+echo "Plist rendered to: ${HOME}/Library/LaunchAgents/com.ohad.cmux-focus.plist"
 echo "Load with: launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.ohad.cmux-focus.plist"
 echo "Smoke test: curl 'http://127.0.0.1:17382/health'"
+echo "Disable per-session: export CMUX_FOCUS_DISABLE=1"

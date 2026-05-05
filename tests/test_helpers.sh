@@ -186,6 +186,25 @@ assert_eq "build: cmux custom CDN_CMUX_FOCUS_PORT=11999" \
     "http://127.0.0.1:11999/focus?token=tok123&workspace=workspace-ok&surface=surface-ok" \
     "$(CDN_CMUX_FOCUS_PORT=11999 CDN_CMUX_FOCUS_TOKEN_FILE=$TOKEN_FILE build_focus_link cmux surface-ok workspace-ok)"
 
+# CMUX_FOCUS_DISABLE kill switch (CC-95 audit fix) — must return empty link
+# even when token + workspace are otherwise valid. Operator-facing kill switch
+# without unloading the LaunchAgent or removing the token file.
+DISABLE_TOKEN_FILE=$(mktemp -t cdn-disable-token-XXXXXX)
+echo "tok-disable" > "$DISABLE_TOKEN_FILE"
+
+assert_eq "build: cmux + CMUX_FOCUS_DISABLE=1 → empty (kill switch)" "" \
+    "$(CDN_CMUX_FOCUS_TOKEN_FILE=$DISABLE_TOKEN_FILE CMUX_FOCUS_DISABLE=1 build_focus_link cmux surf1 ws1)"
+
+assert_eq "build: cmux + CMUX_FOCUS_DISABLE=0 → URL (off by default)" \
+    "http://127.0.0.1:17382/focus?token=tok-disable&workspace=ws1&surface=surf1" \
+    "$(CDN_CMUX_FOCUS_TOKEN_FILE=$DISABLE_TOKEN_FILE CMUX_FOCUS_DISABLE=0 build_focus_link cmux surf1 ws1)"
+
+assert_eq "build: cmux + CMUX_FOCUS_DISABLE unset → URL (default behavior)" \
+    "http://127.0.0.1:17382/focus?token=tok-disable&workspace=ws1&surface=surf1" \
+    "$(CDN_CMUX_FOCUS_TOKEN_FILE=$DISABLE_TOKEN_FILE build_focus_link cmux surf1 ws1)"
+
+rm -f "$DISABLE_TOKEN_FILE"
+
 rm -f "$TOKEN_FILE"
 
 # ════════════════════════════════════════════════════════════════════

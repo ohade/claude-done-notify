@@ -1,3 +1,4 @@
 *.log
 .claude-done-notify.env
 .DS_Store
+__pycache__/
