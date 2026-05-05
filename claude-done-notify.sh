@@ -76,12 +76,20 @@ build_focus_link() {
 
     case "$terminal_type" in
         cmux)
+            # CMUX_FOCUS_DISABLE=1 kill switch (CC-95 audit fix).
+            # Per-invocation opt-out without unloading the LaunchAgent or
+            # removing the token file. Slack message is still sent, just
+            # without the focus URL — same behavior as missing token.
+            if [[ "${CMUX_FOCUS_DISABLE:-0}" == "1" ]]; then
+                echo ""
+                return 0
+            fi
             local port="${CDN_CMUX_FOCUS_PORT:-17382}"
             local token_file="${CDN_CMUX_FOCUS_TOKEN_FILE:-${HOME}/.cmux-focus-token}"
             local token=""
             [[ -f "$token_file" ]] && token=$(cat "$token_file" 2>/dev/null)
-            # CC-64D delivers cmux runtime block; until then, missing token or
-            # workspace → empty link (no focus, but Slack message still sent).
+            # Missing token or workspace → empty link (no focus, but Slack
+            # message still sent).
             if [[ -n "$token" && -n "$extra" ]]; then
                 echo "http://127.0.0.1:${port}/focus?token=${token}&workspace=${extra}&surface=${id}"
             else
@@ -224,11 +232,28 @@ sleep "$FOCUS_DELAY"
 
 PANE_TITLE=""
 MY_PANE_ID=""
+MY_WORKSPACE_ID=""
 TAB_NUMBER=""
 
 # CC-97: terminal-mode detection lives in detect_terminal_mode() (top of file).
 TERMINAL_MODE=$(detect_terminal_mode)
 
+# ── cmux runtime identity (CC-64D) ──
+if [[ "$TERMINAL_MODE" == "cmux" ]]; then
+    MY_WORKSPACE_ID="${CMUX_WORKSPACE_ID:-}"
+    MY_PANE_ID="${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}"
+    PANE_TITLE=""
+    TAB_NUMBER=""
+    # Optional cmux identify enrichment — best effort, never fail the hook.
+    if command -v cmux &>/dev/null && [[ -z "$MY_WORKSPACE_ID" || -z "$MY_PANE_ID" ]]; then
+        _ID_JSON=$(cmux identify 2>/dev/null || echo "{}")
+        [[ -z "$MY_WORKSPACE_ID" ]] && MY_WORKSPACE_ID=$(echo "$_ID_JSON" | jq -r '.focused.workspace_id // empty' 2>/dev/null || echo "")
+        [[ -z "$MY_PANE_ID" ]] && MY_PANE_ID=$(echo "$_ID_JSON" | jq -r '.focused.surface_id // .focused.panel_id // empty' 2>/dev/null || echo "")
+    fi
+    echo "$(date '+%H:%M:%S') PANE: cmux ws=$MY_WORKSPACE_ID surface=$MY_PANE_ID" >&2
+fi
+
+# ── WezTerm runtime identity ──
 if [[ "$TERMINAL_MODE" == "wezterm" ]]; then
     PANE_JSON=$(wezterm cli list --format json 2>/dev/null || echo "[]")
     # Prefer WEZTERM_PANE env var (works through PTY proxies like claude-chill)
@@ -336,6 +361,34 @@ if command -v osascript &>/dev/null; then
             echo "$(date '+%H:%M:%S') PASS: wezterm focused but different tab" >&2
         else
             echo "$(date '+%H:%M:%S') SKIP: wezterm focused, can't determine pane" >&2
+            exit 0
+        fi
+    elif echo "$FRONTMOST" | grep -qi "^cmux$" && [[ "$TERMINAL_MODE" == "cmux" ]]; then
+        # System Events may report either "cmux" or "Cmux"; use an exact,
+        # case-insensitive match so unrelated app names do not fall through here.
+        if [[ -n "$MY_PANE_ID" && -n "$MY_WORKSPACE_ID" ]]; then
+            # focused.surface_id reflects what the user is looking at now, not
+            # what the env var said at session start. If identify is unavailable,
+            # conservatively skip because cmux itself is frontmost.
+            if ! command -v cmux &>/dev/null; then
+                echo "$(date '+%H:%M:%S') SKIP: cmux focused, identify unavailable" >&2
+                exit 0
+            fi
+            FOCUSED_JSON=$(cmux identify 2>/dev/null || echo "{}")
+            FOCUSED_WS=$(echo "$FOCUSED_JSON" | jq -r '.focused.workspace_id // empty' 2>/dev/null || echo "")
+            FOCUSED_SF=$(echo "$FOCUSED_JSON" | jq -r '.focused.surface_id // .focused.panel_id // empty' 2>/dev/null || echo "")
+            echo "$(date '+%H:%M:%S') FOCUS: my=$MY_WORKSPACE_ID/$MY_PANE_ID focused=$FOCUSED_WS/$FOCUSED_SF" >&2
+            if [[ -z "$FOCUSED_WS" || -z "$FOCUSED_SF" ]]; then
+                echo "$(date '+%H:%M:%S') SKIP: cmux focused, identify returned no focused surface" >&2
+                exit 0
+            fi
+            if [[ "$MY_WORKSPACE_ID" == "$FOCUSED_WS" && "$MY_PANE_ID" == "$FOCUSED_SF" ]]; then
+                echo "$(date '+%H:%M:%S') SKIP: user is on this exact cmux surface" >&2
+                exit 0
+            fi
+            echo "$(date '+%H:%M:%S') PASS: cmux focused but different surface" >&2
+        else
+            echo "$(date '+%H:%M:%S') SKIP: cmux focused, missing ws/surface env" >&2
             exit 0
         fi
     elif echo "$FRONTMOST" | grep -qi "terminal\|iterm\|alacritty\|kitty\|wezterm\|ghostty"; then
@@ -519,9 +572,16 @@ FALLBACK_TEXT="${SESSION_NAME} — ${TLDR}"
 SESSION_THREAD_ENABLED="${CDN_SESSION_THREAD:-1}"
 SIGNAL_HUB_DIR="${HOME}/.signal-hub"
 
-# Determine stable thread key: terminal ID > pane ID > session ID
+# Determine stable thread key.
+# cmux: workspace+surface+session-scoped key (CC-95 audit fix). Two cmux sessions
+#   that happen to share a surface_id would otherwise collide into one Slack
+#   thread; the workspace prefix and session_id suffix make collisions impossible.
+# ghostty/wezterm: terminal/pane id (one thread per terminal tab, day-scoped).
+# fallback: session_id alone.
 THREAD_KEY=""
-if [[ -n "$MY_PANE_ID" ]]; then
+if [[ "$TERMINAL_MODE" == "cmux" && -n "$MY_WORKSPACE_ID" && -n "$MY_PANE_ID" ]]; then
+    THREAD_KEY="cmux:${MY_WORKSPACE_ID}:${MY_PANE_ID}:${SESSION_ID}"
+elif [[ -n "$MY_PANE_ID" ]]; then
     THREAD_KEY="$MY_PANE_ID"
 else
     THREAD_KEY="$SESSION_ID"
