@@ -20,7 +20,8 @@ if [[ ! -f "$SOURCE" ]]; then
 fi
 
 HELPERS_TMP=$(mktemp -t cdn-helpers-XXXXXX)
-trap 'rm -f "$HELPERS_TMP"' EXIT
+CMUX_RUNTIME_TMP=$(mktemp -t cdn-cmux-runtime-XXXXXX)
+trap 'rm -f "$HELPERS_TMP" "$CMUX_RUNTIME_TMP"' EXIT
 
 awk '
     /^# ── Terminal helpers \(CC-97\) ──/ { in_block=1 }
@@ -28,9 +29,21 @@ awk '
     in_block { print }
 ' "$SOURCE" > "$HELPERS_TMP"
 
+awk '
+    /^# ── cmux runtime identity \(CC-64D\) ──/ { in_block=1 }
+    /^# ── WezTerm runtime identity ──/ { in_block=0 }
+    in_block { print }
+' "$SOURCE" > "$CMUX_RUNTIME_TMP"
+
 if ! grep -q '^detect_terminal_mode()' "$HELPERS_TMP" || \
    ! grep -q '^build_focus_link()' "$HELPERS_TMP"; then
     echo "ERR: helpers extraction failed (markers missing or moved)" >&2
+    exit 2
+fi
+
+if ! grep -q 'MY_WORKSPACE_ID="${CMUX_WORKSPACE_ID:-}"' "$CMUX_RUNTIME_TMP" || \
+   ! grep -q 'MY_PANE_ID="${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}"' "$CMUX_RUNTIME_TMP"; then
+    echo "ERR: cmux runtime extraction failed (markers missing or moved)" >&2
     exit 2
 fi
 
@@ -54,6 +67,7 @@ assert_eq() {
 
 clean_env() {
     unset CDN_TERMINAL CMUX_SURFACE_ID CMUX_PANEL_ID GHOSTTY_TERMINAL_ID \
+          CMUX_WORKSPACE_ID CMUX_BUNDLED_CLI_PATH \
           CDN_CMUX_FOCUS_PORT CDN_CMUX_FOCUS_TOKEN_FILE \
           CDN_GHOSTTY_FOCUS_PORT CDN_FOCUS_PORT
 }
@@ -141,8 +155,14 @@ echo "tok123" > "$TOKEN_FILE"
 assert_eq "build: cmux without workspace (extra) → empty" "" \
     "$(CDN_CMUX_FOCUS_TOKEN_FILE=$TOKEN_FILE build_focus_link cmux surf1)"
 
+assert_eq "build: cmux token present but missing workspace → empty" "" \
+    "$(CDN_CMUX_FOCUS_TOKEN_FILE=$TOKEN_FILE build_focus_link cmux surface-ok "")"
+
 assert_eq "build: cmux without token file → empty" "" \
     "$(CDN_CMUX_FOCUS_TOKEN_FILE=/nonexistent build_focus_link cmux surf1 ws1)"
+
+assert_eq "build: cmux missing token file → empty link" "" \
+    "$(CDN_CMUX_FOCUS_TOKEN_FILE=/tmp/cdn-token-does-not-exist build_focus_link cmux surface-ok workspace-ok)"
 
 EMPTY_TOKEN_FILE=$(mktemp -t cdn-empty-token-XXXXXX)
 : > "$EMPTY_TOKEN_FILE"
@@ -154,11 +174,50 @@ assert_eq "build: cmux full URL (token + workspace)" \
     "http://127.0.0.1:17382/focus?token=tok123&workspace=ws1&surface=surf1" \
     "$(CDN_CMUX_FOCUS_TOKEN_FILE=$TOKEN_FILE build_focus_link cmux surf1 ws1)"
 
+assert_eq "build: cmux valid token + valid workspace/surface" \
+    "http://127.0.0.1:17382/focus?token=tok123&workspace=workspace-ok&surface=surface-ok" \
+    "$(CDN_CMUX_FOCUS_TOKEN_FILE=$TOKEN_FILE build_focus_link cmux surface-ok workspace-ok)"
+
 assert_eq "build: cmux custom port" \
     "http://127.0.0.1:33333/focus?token=tok123&workspace=ws1&surface=surf1" \
     "$(CDN_CMUX_FOCUS_PORT=33333 CDN_CMUX_FOCUS_TOKEN_FILE=$TOKEN_FILE build_focus_link cmux surf1 ws1)"
 
+assert_eq "build: cmux custom CDN_CMUX_FOCUS_PORT=11999" \
+    "http://127.0.0.1:11999/focus?token=tok123&workspace=workspace-ok&surface=surface-ok" \
+    "$(CDN_CMUX_FOCUS_PORT=11999 CDN_CMUX_FOCUS_TOKEN_FILE=$TOKEN_FILE build_focus_link cmux surface-ok workspace-ok)"
+
 rm -f "$TOKEN_FILE"
+
+# ════════════════════════════════════════════════════════════════════
+# cmux runtime block — unit tests
+# ════════════════════════════════════════════════════════════════════
+clean_env
+
+CMUX_RUNTIME_ENV_RESULT=$(env -i PATH=/bin:/usr/bin HOME="$HOME" \
+    TERMINAL_MODE=cmux CMUX_SURFACE_ID=surface-77 CMUX_WORKSPACE_ID=workspace-77 \
+    /bin/bash -c "
+        PANE_TITLE=old-title
+        MY_PANE_ID=old-pane
+        MY_WORKSPACE_ID=old-workspace
+        TAB_NUMBER=9
+        source '$CMUX_RUNTIME_TMP'
+        printf '%s|%s|%s|%s\n' \"\$MY_WORKSPACE_ID\" \"\$MY_PANE_ID\" \"\$PANE_TITLE\" \"\$TAB_NUMBER\"
+    " 2>/dev/null)
+assert_eq "runtime: cmux env populates workspace/surface" \
+    "workspace-77|surface-77||" "$CMUX_RUNTIME_ENV_RESULT"
+
+CMUX_RUNTIME_PANEL_RESULT=$(env -i PATH=/bin:/usr/bin HOME="$HOME" \
+    TERMINAL_MODE=cmux CMUX_PANEL_ID=panel-88 CMUX_WORKSPACE_ID=workspace-88 \
+    /bin/bash -c "
+        PANE_TITLE=old-title
+        MY_PANE_ID=old-pane
+        MY_WORKSPACE_ID=old-workspace
+        TAB_NUMBER=9
+        source '$CMUX_RUNTIME_TMP'
+        printf '%s|%s|%s|%s\n' \"\$MY_WORKSPACE_ID\" \"\$MY_PANE_ID\" \"\$PANE_TITLE\" \"\$TAB_NUMBER\"
+    " 2>/dev/null)
+assert_eq "runtime: cmux panel alias populates surface id" \
+    "workspace-88|panel-88||" "$CMUX_RUNTIME_PANEL_RESULT"
 
 # ════════════════════════════════════════════════════════════════════
 # Regression: parity with pre-CC-97 inline logic

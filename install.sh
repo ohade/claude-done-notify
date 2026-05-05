@@ -40,6 +40,21 @@ EOF
     echo "Wrote $CONFIG_FILE (permissions: 600)"
 fi
 
+# ── Step 1b: cmux focus token bootstrap (CC-64D) ──
+TOKEN_FILE="${HOME}/.cmux-focus-token"
+if [[ ! -f "$TOKEN_FILE" ]]; then
+    if command -v openssl &>/dev/null; then
+        openssl rand -hex 32 > "$TOKEN_FILE"
+    else
+        # Fallback for systems without openssl — /dev/urandom is universally available.
+        head -c 32 /dev/urandom | xxd -p -c 64 > "$TOKEN_FILE"
+    fi
+    chmod 600 "$TOKEN_FILE"
+    echo "Wrote $TOKEN_FILE (cmux focus token, permissions: 600)"
+else
+    echo "cmux focus token already exists: $TOKEN_FILE (kept)"
+fi
+
 # ── Step 2: Ensure directories ──
 mkdir -p "$SIGNALS_DIR"
 echo "Ensured signals directory: $SIGNALS_DIR"
@@ -83,3 +98,8 @@ JSONEOF
 echo
 echo "Done! Start a new Claude Code session to test."
 echo "Debug log: ~/.claude/hooks/debug-claude-done-notify.log"
+echo
+echo "── cmux focus server (CC-64D) ──"
+echo "Install plist: cp \"${SCRIPT_DIR}/com.ohad.cmux-focus.plist\" ~/Library/LaunchAgents/com.ohad.cmux-focus.plist"
+echo "Load with: launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.ohad.cmux-focus.plist"
+echo "Smoke test: curl 'http://127.0.0.1:17382/health'"
