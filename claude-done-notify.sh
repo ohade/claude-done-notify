@@ -368,28 +368,28 @@ if command -v osascript &>/dev/null; then
         # case-insensitive match so unrelated app names do not fall through here.
         if [[ -n "$MY_PANE_ID" && -n "$MY_WORKSPACE_ID" ]]; then
             # focused.surface_id reflects what the user is looking at now, not
-            # what the env var said at session start. If identify is unavailable,
-            # conservatively skip because cmux itself is frontmost.
+            # what the env var said at session start. Only suppress Slack when
+            # identify proves this exact workspace/surface is focused; unknown
+            # focus state must still notify.
             if ! command -v cmux &>/dev/null; then
-                echo "$(date '+%H:%M:%S') SKIP: cmux focused, identify unavailable" >&2
-                exit 0
+                echo "$(date '+%H:%M:%S') PASS: cmux focused, identify unavailable" >&2
+            else
+                FOCUSED_JSON=$(cmux identify 2>/dev/null || echo "{}")
+                FOCUSED_WS=$(echo "$FOCUSED_JSON" | jq -r '.focused.workspace_id // empty' 2>/dev/null || echo "")
+                FOCUSED_SF=$(echo "$FOCUSED_JSON" | jq -r '.focused.surface_id // .focused.panel_id // empty' 2>/dev/null || echo "")
+                echo "$(date '+%H:%M:%S') FOCUS: my=$MY_WORKSPACE_ID/$MY_PANE_ID focused=$FOCUSED_WS/$FOCUSED_SF" >&2
+                if [[ "$MY_WORKSPACE_ID" == "$FOCUSED_WS" && "$MY_PANE_ID" == "$FOCUSED_SF" ]]; then
+                    echo "$(date '+%H:%M:%S') SKIP: user is on this exact cmux surface" >&2
+                    exit 0
+                fi
+                if [[ -z "$FOCUSED_WS" || -z "$FOCUSED_SF" ]]; then
+                    echo "$(date '+%H:%M:%S') PASS: cmux focused, identify returned no focused surface" >&2
+                else
+                    echo "$(date '+%H:%M:%S') PASS: cmux focused but different surface" >&2
+                fi
             fi
-            FOCUSED_JSON=$(cmux identify 2>/dev/null || echo "{}")
-            FOCUSED_WS=$(echo "$FOCUSED_JSON" | jq -r '.focused.workspace_id // empty' 2>/dev/null || echo "")
-            FOCUSED_SF=$(echo "$FOCUSED_JSON" | jq -r '.focused.surface_id // .focused.panel_id // empty' 2>/dev/null || echo "")
-            echo "$(date '+%H:%M:%S') FOCUS: my=$MY_WORKSPACE_ID/$MY_PANE_ID focused=$FOCUSED_WS/$FOCUSED_SF" >&2
-            if [[ -z "$FOCUSED_WS" || -z "$FOCUSED_SF" ]]; then
-                echo "$(date '+%H:%M:%S') SKIP: cmux focused, identify returned no focused surface" >&2
-                exit 0
-            fi
-            if [[ "$MY_WORKSPACE_ID" == "$FOCUSED_WS" && "$MY_PANE_ID" == "$FOCUSED_SF" ]]; then
-                echo "$(date '+%H:%M:%S') SKIP: user is on this exact cmux surface" >&2
-                exit 0
-            fi
-            echo "$(date '+%H:%M:%S') PASS: cmux focused but different surface" >&2
         else
-            echo "$(date '+%H:%M:%S') SKIP: cmux focused, missing ws/surface env" >&2
-            exit 0
+            echo "$(date '+%H:%M:%S') PASS: cmux focused, missing ws/surface env" >&2
         fi
     elif echo "$FRONTMOST" | grep -qi "terminal\|iterm\|alacritty\|kitty\|wezterm\|ghostty"; then
         # Generic terminal detection — if ANY terminal is focused, skip
