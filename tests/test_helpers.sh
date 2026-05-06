@@ -21,7 +21,9 @@ fi
 
 HELPERS_TMP=$(mktemp -t cdn-helpers-XXXXXX)
 CMUX_RUNTIME_TMP=$(mktemp -t cdn-cmux-runtime-XXXXXX)
-trap 'rm -f "$HELPERS_TMP" "$CMUX_RUNTIME_TMP"' EXIT
+CMUX_FOCUS_TMP=$(mktemp -t cdn-cmux-focus-XXXXXX)
+FAKE_CMUX_FOCUS_DIR=$(mktemp -d -t cdn-fake-cmux-focus-XXXXXX)
+trap 'rm -f "$HELPERS_TMP" "$CMUX_RUNTIME_TMP" "$CMUX_FOCUS_TMP"; rm -rf "$FAKE_CMUX_FOCUS_DIR"' EXIT
 
 awk '
     /^# ── Terminal helpers \(CC-97\) ──/ { in_block=1 }
@@ -35,6 +37,12 @@ awk '
     in_block { print }
 ' "$SOURCE" > "$CMUX_RUNTIME_TMP"
 
+awk '
+    /^# Check if user is looking at THIS session/ { in_block=1 }
+    /^# ── Build session title ──/ { in_block=0 }
+    in_block { print }
+' "$SOURCE" > "$CMUX_FOCUS_TMP"
+
 if ! grep -q '^detect_terminal_mode()' "$HELPERS_TMP" || \
    ! grep -q '^build_focus_link()' "$HELPERS_TMP"; then
     echo "ERR: helpers extraction failed (markers missing or moved)" >&2
@@ -44,6 +52,11 @@ fi
 if ! grep -q 'MY_WORKSPACE_ID="${CMUX_WORKSPACE_ID:-}"' "$CMUX_RUNTIME_TMP" || \
    ! grep -q 'MY_PANE_ID="${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}"' "$CMUX_RUNTIME_TMP"; then
     echo "ERR: cmux runtime extraction failed (markers missing or moved)" >&2
+    exit 2
+fi
+
+if ! grep -q 'user is on this exact cmux surface' "$CMUX_FOCUS_TMP"; then
+    echo "ERR: cmux focus extraction failed (markers missing or moved)" >&2
     exit 2
 fi
 
@@ -237,6 +250,46 @@ CMUX_RUNTIME_PANEL_RESULT=$(env -i PATH=/bin:/usr/bin HOME="$HOME" \
     " 2>/dev/null)
 assert_eq "runtime: cmux panel alias populates surface id" \
     "workspace-88|panel-88||" "$CMUX_RUNTIME_PANEL_RESULT"
+
+# ════════════════════════════════════════════════════════════════════
+# cmux focus-skip block — regression tests
+# ════════════════════════════════════════════════════════════════════
+cat > "$FAKE_CMUX_FOCUS_DIR/osascript" <<'EOF'
+#!/bin/sh
+echo cmux
+EOF
+cat > "$FAKE_CMUX_FOCUS_DIR/cmux" <<'EOF'
+#!/bin/sh
+if [ "${FAKE_CMUX_IDENTIFY_FAIL:-0}" = "1" ]; then
+    exit 1
+fi
+printf '%s\n' "${FAKE_CMUX_IDENTIFY_JSON:-{}}"
+EOF
+chmod +x "$FAKE_CMUX_FOCUS_DIR/osascript" "$FAKE_CMUX_FOCUS_DIR/cmux"
+
+run_cmux_focus_block() {
+    local identify_json="$1"
+    local identify_fail="${2:-0}"
+    env -i PATH="$FAKE_CMUX_FOCUS_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" HOME="$HOME" \
+        TERMINAL_MODE=cmux MY_WORKSPACE_ID=workspace-ok MY_PANE_ID=surface-ok \
+        FAKE_CMUX_IDENTIFY_JSON="$identify_json" FAKE_CMUX_IDENTIFY_FAIL="$identify_fail" \
+        /bin/bash -c "
+            source '$CMUX_FOCUS_TMP'
+            printf 'after\n'
+        " 2>/dev/null
+}
+
+assert_eq "focus: cmux exact focused surface skips" "" \
+    "$(run_cmux_focus_block '{"focused":{"workspace_id":"workspace-ok","surface_id":"surface-ok"}}')"
+
+assert_eq "focus: cmux identify no focused surface falls through" "after" \
+    "$(run_cmux_focus_block '{"focused":{}}')"
+
+assert_eq "focus: cmux identify failure falls through" "after" \
+    "$(run_cmux_focus_block '{}' 1)"
+
+assert_eq "focus: cmux different focused surface falls through" "after" \
+    "$(run_cmux_focus_block '{"focused":{"workspace_id":"workspace-ok","surface_id":"surface-other"}}')"
 
 # ════════════════════════════════════════════════════════════════════
 # Regression: parity with pre-CC-97 inline logic
