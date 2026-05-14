@@ -3,13 +3,15 @@
 
 Listens on localhost:17382 (configurable via CMUX_FOCUS_PORT env var).
 Endpoints:
-  GET /focus?token=<t>&workspace=<ws>&surface=<sf>  — focus cmux surface
-  GET /health                                       — health check
+  GET /focus?token=<t>&workspace=<ws>&surface=<sf>  - focus cmux surface
+  GET /focus?token=<t>&session=<sid>&agent=<agent>  - resolve current session surface
+  GET /health                                       - health check
 
 Used by claude-done-notify to provide clickable links in Slack messages.
 """
 
 import http.server
+import json
 import os
 import re
 import secrets
@@ -23,6 +25,9 @@ from urllib.parse import parse_qs, urlparse
 PORT = int(os.environ.get("CMUX_FOCUS_PORT", "17382"))
 TOKEN_FILE = Path.home() / ".cmux-focus-token"
 ID_RE = re.compile(r"^[A-Za-z0-9_:-]{1,128}$")
+SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+AGENT_RE = re.compile(r"^[A-Za-z0-9_-]{0,32}$")
+CMUX_HOOK_STATE_DIR = Path.home() / ".cmuxterm"
 CMUX_BUNDLE_ID = os.environ.get("CMUX_BUNDLE_ID", "com.cmuxterm.app")
 CMUX_PATHS = (
     os.environ.get("CMUX_BUNDLED_CLI_PATH", ""),
@@ -95,6 +100,49 @@ def run_cmux(cmux, args):
         raise RuntimeError(stderr_tail(result))
 
 
+def read_json(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"WARN: cannot read {path}: {exc}\n")
+        sys.stderr.flush()
+        return {}
+
+
+def hook_state_paths(agent):
+    agent = (agent or "").lower()
+    if agent.startswith("codex"):
+        keys = ("codex", "claude")
+    elif agent.startswith("claude"):
+        keys = ("claude", "codex")
+    else:
+        keys = ("claude", "codex")
+    return [CMUX_HOOK_STATE_DIR / f"{key}-hook-sessions.json" for key in keys]
+
+
+def resolve_session_target(session_id, agent=""):
+    if not session_id or not SESSION_RE.fullmatch(session_id):
+        return None
+
+    for path in hook_state_paths(agent):
+        state = read_json(path)
+        session = state.get("sessions", {}).get(session_id)
+        if not isinstance(session, dict):
+            continue
+        workspace_id = session.get("workspaceId") or session.get("workspace_id")
+        surface_id = (
+            session.get("surfaceId")
+            or session.get("surface_id")
+            or session.get("panelId")
+            or session.get("panel_id")
+        )
+        if workspace_id and surface_id:
+            return str(workspace_id), str(surface_id)
+    return None
+
+
 def activate_cmux_app():
     result = subprocess.run(
         ["osascript", "-e", f'tell application id "{CMUX_BUNDLE_ID}" to activate'],
@@ -130,12 +178,11 @@ class FocusHandler(http.server.BaseHTTPRequestHandler):
             token = params.get("token", [""])[0]
             workspace_id = params.get("workspace", [""])[0]
             surface_id = params.get("surface", [""])[0]
+            session_id = params.get("session", [""])[0]
+            agent = params.get("agent", [""])[0]
 
             if not token:
                 self._respond(403, "missing token")
-                return
-            if not workspace_id or not surface_id:
-                self._respond(400, "need ?workspace=&surface=")
                 return
 
             expected_token = read_token()
@@ -143,6 +190,20 @@ class FocusHandler(http.server.BaseHTTPRequestHandler):
                 self._respond(403, "invalid token")
                 return
 
+            if session_id and not SESSION_RE.fullmatch(session_id):
+                self._respond(400, "invalid session format")
+                return
+            if agent and not AGENT_RE.fullmatch(agent):
+                self._respond(400, "invalid agent format")
+                return
+
+            resolved = resolve_session_target(session_id, agent)
+            if resolved:
+                workspace_id, surface_id = resolved
+
+            if not workspace_id or not surface_id:
+                self._respond(400, "need ?workspace=&surface= or ?session=")
+                return
             if not ID_RE.fullmatch(workspace_id) or not ID_RE.fullmatch(surface_id):
                 self._respond(400, "invalid id format")
                 return

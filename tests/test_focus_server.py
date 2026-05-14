@@ -10,6 +10,7 @@ Run: python3 tests/test_focus_server.py
 """
 
 import importlib.util
+import json
 import os
 import stat
 import sys
@@ -110,6 +111,67 @@ class IDRegexTests(unittest.TestCase):
     def test_rejects_path_separators_and_injection(self):
         for bad in ("../etc", "ws/sub", "ws\x00", "ws;ls", "x" * 129, "", "ws.dot"):
             self.assertIsNone(self.mod.ID_RE.fullmatch(bad), bad)
+
+
+class ResolveSessionTargetTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory(prefix="cdn-cmux-state-")
+        self.state_dir = Path(self.tmpdir.name)
+        self.mod = _load_server_module()
+        self._orig_state_dir = self.mod.CMUX_HOOK_STATE_DIR
+        self.mod.CMUX_HOOK_STATE_DIR = self.state_dir
+
+    def tearDown(self):
+        self.mod.CMUX_HOOK_STATE_DIR = self._orig_state_dir
+        self.tmpdir.cleanup()
+
+    def _write_state(self, agent, sessions):
+        path = self.state_dir / f"{agent}-hook-sessions.json"
+        path.write_text(json.dumps({"sessions": sessions}), encoding="utf-8")
+
+    def test_resolves_agent_specific_session(self):
+        self._write_state(
+            "claude",
+            {
+                "session-1": {
+                    "workspaceId": "workspace-uuid",
+                    "surfaceId": "surface-uuid",
+                }
+            },
+        )
+
+        self.assertEqual(
+            self.mod.resolve_session_target("session-1", "claude"),
+            ("workspace-uuid", "surface-uuid"),
+        )
+
+    def test_agent_controls_registry_preference(self):
+        self._write_state(
+            "claude",
+            {"shared-session": {"workspaceId": "claude-ws", "surfaceId": "claude-sf"}},
+        )
+        self._write_state(
+            "codex",
+            {"shared-session": {"workspaceId": "codex-ws", "surfaceId": "codex-sf"}},
+        )
+
+        self.assertEqual(
+            self.mod.resolve_session_target("shared-session", "codex"),
+            ("codex-ws", "codex-sf"),
+        )
+        self.assertEqual(
+            self.mod.resolve_session_target("shared-session", "claude"),
+            ("claude-ws", "claude-sf"),
+        )
+
+    def test_returns_none_for_missing_or_invalid_session(self):
+        self._write_state(
+            "codex",
+            {"session-1": {"workspaceId": "workspace-uuid", "surfaceId": "surface-uuid"}},
+        )
+
+        self.assertIsNone(self.mod.resolve_session_target("missing", "codex"))
+        self.assertIsNone(self.mod.resolve_session_target("../session", "codex"))
 
 
 class FocusCmuxTests(unittest.TestCase):

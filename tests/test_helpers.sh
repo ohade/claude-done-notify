@@ -71,7 +71,8 @@ clean_env() {
     unset CDN_TERMINAL CMUX_SURFACE_ID CMUX_PANEL_ID GHOSTTY_TERMINAL_ID \
           CMUX_WORKSPACE_ID CMUX_BUNDLED_CLI_PATH \
           CDN_CMUX_FOCUS_PORT CDN_CMUX_FOCUS_TOKEN_FILE \
-          CDN_GHOSTTY_FOCUS_PORT CDN_FOCUS_PORT
+          CDN_GHOSTTY_FOCUS_PORT CDN_FOCUS_PORT \
+          SESSION_ID AGENT_NAME
 }
 
 # ════════════════════════════════════════════════════════════════════
@@ -163,6 +164,15 @@ CMUX_STATE_RESULT=$(env -i PATH=/usr/bin:/bin HOME="$CMUX_STATE_HOME" \
     ")
 assert_eq "cmux identity: reads Codex cmux hook registry" \
     "workspace-from-state|surface-from-state" "$CMUX_STATE_RESULT"
+
+CMUX_STATE_OVERRIDE_RESULT=$(env -i PATH=/usr/bin:/bin HOME="$CMUX_STATE_HOME" \
+    SESSION_ID=codex-session AGENT_NAME=Codex \
+    CMUX_WORKSPACE_ID=stale-workspace CMUX_SURFACE_ID=stale-surface /bin/bash -c "
+        source '$HELPERS_TMP'
+        capture_cmux_identity
+    ")
+assert_eq "cmux identity: hook registry overrides stale env" \
+    "workspace-from-state|surface-from-state" "$CMUX_STATE_OVERRIDE_RESULT"
 rm -rf "$CMUX_STATE_HOME"
 
 # ════════════════════════════════════════════════════════════════════
@@ -221,6 +231,10 @@ assert_eq "build: cmux full URL (token + workspace)" \
     "http://127.0.0.1:17382/focus?token=tok123&workspace=ws1&surface=surf1" \
     "$(CDN_CMUX_FOCUS_TOKEN_FILE=$TOKEN_FILE build_focus_link cmux surf1 ws1)"
 
+assert_eq "build: cmux URL includes session when available" \
+    "http://127.0.0.1:17382/focus?token=tok123&workspace=ws1&surface=surf1&session=codex-session&agent=codex" \
+    "$(SESSION_ID=codex-session AGENT_NAME=Codex CDN_CMUX_FOCUS_TOKEN_FILE=$TOKEN_FILE build_focus_link cmux surf1 ws1)"
+
 assert_eq "build: cmux valid token + valid workspace/surface" \
     "http://127.0.0.1:17382/focus?token=tok123&workspace=workspace-ok&surface=surface-ok" \
     "$(CDN_CMUX_FOCUS_TOKEN_FILE=$TOKEN_FILE build_focus_link cmux surface-ok workspace-ok)"
@@ -266,6 +280,7 @@ CMUX_RUNTIME_ENV_RESULT=$(env -i PATH=/bin:/usr/bin HOME="$HOME" \
         MY_PANE_ID=old-pane
         MY_WORKSPACE_ID=old-workspace
         TAB_NUMBER=9
+        source '$HELPERS_TMP'
         source '$CMUX_RUNTIME_TMP'
         printf '%s|%s|%s|%s\n' \"\$MY_WORKSPACE_ID\" \"\$MY_PANE_ID\" \"\$PANE_TITLE\" \"\$TAB_NUMBER\"
     " 2>/dev/null)
@@ -279,11 +294,40 @@ CMUX_RUNTIME_PANEL_RESULT=$(env -i PATH=/bin:/usr/bin HOME="$HOME" \
         MY_PANE_ID=old-pane
         MY_WORKSPACE_ID=old-workspace
         TAB_NUMBER=9
+        source '$HELPERS_TMP'
         source '$CMUX_RUNTIME_TMP'
         printf '%s|%s|%s|%s\n' \"\$MY_WORKSPACE_ID\" \"\$MY_PANE_ID\" \"\$PANE_TITLE\" \"\$TAB_NUMBER\"
     " 2>/dev/null)
 assert_eq "runtime: cmux panel alias populates surface id" \
     "workspace-88|panel-88||" "$CMUX_RUNTIME_PANEL_RESULT"
+
+CMUX_RUNTIME_HOME=$(mktemp -d -t cdn-cmux-runtime-home-XXXXXX)
+mkdir -p "$CMUX_RUNTIME_HOME/.cmuxterm"
+cat > "$CMUX_RUNTIME_HOME/.cmuxterm/claude-hook-sessions.json" <<'EOF'
+{
+  "sessions": {
+    "runtime-session": {
+      "workspaceId": "runtime-workspace",
+      "surfaceId": "runtime-surface"
+    }
+  }
+}
+EOF
+CMUX_RUNTIME_STATE_RESULT=$(env -i PATH=/bin:/usr/bin HOME="$CMUX_RUNTIME_HOME" \
+    TERMINAL_MODE=cmux SESSION_ID=runtime-session AGENT_NAME=Claude \
+    CMUX_SURFACE_ID=stale-surface CMUX_WORKSPACE_ID=stale-workspace \
+    /bin/bash -c "
+        PANE_TITLE=old-title
+        MY_PANE_ID=old-pane
+        MY_WORKSPACE_ID=old-workspace
+        TAB_NUMBER=9
+        source '$HELPERS_TMP'
+        source '$CMUX_RUNTIME_TMP'
+        printf '%s|%s|%s|%s\n' \"\$MY_WORKSPACE_ID\" \"\$MY_PANE_ID\" \"\$PANE_TITLE\" \"\$TAB_NUMBER\"
+    " 2>/dev/null)
+assert_eq "runtime: cmux hook registry overrides stale env" \
+    "runtime-workspace|runtime-surface||" "$CMUX_RUNTIME_STATE_RESULT"
+rm -rf "$CMUX_RUNTIME_HOME"
 
 # ════════════════════════════════════════════════════════════════════
 # Regression: parity with pre-CC-97 inline logic

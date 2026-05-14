@@ -92,7 +92,11 @@ build_focus_link() {
             # Missing token or workspace → empty link (no focus, but Slack
             # message still sent).
             if [[ -n "$token" && -n "$extra" ]]; then
-                echo "http://127.0.0.1:${port}/focus?token=${token}&workspace=${extra}&surface=${id}"
+                local session_q=""
+                if [[ -n "${SESSION_ID:-}" ]]; then
+                    session_q="&session=${SESSION_ID}&agent=$(cmux_agent_key)"
+                fi
+                echo "http://127.0.0.1:${port}/focus?token=${token}&workspace=${extra}&surface=${id}${session_q}"
             else
                 echo ""
             fi
@@ -139,15 +143,30 @@ cmux_agent_key() {
 }
 
 read_cmux_session_identity() {
-    local agent_key state_file
+    local agent_key state_file line
+    local state_files=()
     agent_key=$(cmux_agent_key)
-    state_file="${HOME}/.cmuxterm/${agent_key}-hook-sessions.json"
-    [[ -n "${SESSION_ID:-}" && -f "$state_file" ]] || return 0
-    jq -r --arg sid "$SESSION_ID" '
-        .sessions[$sid]?
-        | select(.workspaceId and .surfaceId)
-        | "\(.workspaceId)|\(.surfaceId)"
-    ' "$state_file" 2>/dev/null | head -1
+    [[ -n "${SESSION_ID:-}" ]] || return 0
+
+    state_files+=("${HOME}/.cmuxterm/${agent_key}-hook-sessions.json")
+    if [[ "$agent_key" == "codex" ]]; then
+        state_files+=("${HOME}/.cmuxterm/claude-hook-sessions.json")
+    else
+        state_files+=("${HOME}/.cmuxterm/codex-hook-sessions.json")
+    fi
+
+    for state_file in "${state_files[@]}"; do
+        [[ -f "$state_file" ]] || continue
+        line=$(jq -r --arg sid "$SESSION_ID" '
+            .sessions[$sid]?
+            | select(.workspaceId and .surfaceId)
+            | "\(.workspaceId)|\(.surfaceId)"
+        ' "$state_file" 2>/dev/null | head -1)
+        if [[ -n "$line" ]]; then
+            printf '%s\n' "$line"
+            return 0
+        fi
+    done
 }
 
 cmux_workspace_from_identify() {
@@ -177,12 +196,10 @@ capture_cmux_identity() {
     ws="${CMUX_WORKSPACE_ID:-}"
     sf="${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}"
 
-    if [[ -z "$ws" || -z "$sf" ]]; then
-        state_line=$(read_cmux_session_identity)
-        if [[ -n "$state_line" ]]; then
-            [[ -z "$ws" ]] && ws=$(echo "$state_line" | cut -d'|' -f1)
-            [[ -z "$sf" ]] && sf=$(echo "$state_line" | cut -d'|' -f2)
-        fi
+    state_line=$(read_cmux_session_identity)
+    if [[ -n "$state_line" ]]; then
+        ws=$(echo "$state_line" | cut -d'|' -f1)
+        sf=$(echo "$state_line" | cut -d'|' -f2)
     fi
 
     if command -v cmux &>/dev/null &&
@@ -343,12 +360,10 @@ fi
 if [[ "$TERMINAL_MODE" == "cmux" ]]; then
     MY_WORKSPACE_ID="${CMUX_WORKSPACE_ID:-}"
     MY_PANE_ID="${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}"
-    if [[ -z "$MY_WORKSPACE_ID" || -z "$MY_PANE_ID" ]]; then
-        _CMUX_LINE=$(capture_cmux_identity)
-        if [[ -n "$_CMUX_LINE" ]]; then
-            [[ -z "$MY_WORKSPACE_ID" ]] && MY_WORKSPACE_ID=$(echo "$_CMUX_LINE" | cut -d'|' -f1)
-            [[ -z "$MY_PANE_ID" ]] && MY_PANE_ID=$(echo "$_CMUX_LINE" | cut -d'|' -f2)
-        fi
+    _CMUX_LINE=$(capture_cmux_identity)
+    if [[ -n "$_CMUX_LINE" ]]; then
+        MY_WORKSPACE_ID=$(echo "$_CMUX_LINE" | cut -d'|' -f1)
+        MY_PANE_ID=$(echo "$_CMUX_LINE" | cut -d'|' -f2)
     fi
     PANE_TITLE=""
     TAB_NUMBER=""
