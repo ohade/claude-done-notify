@@ -95,8 +95,16 @@ class IDRegexTests(unittest.TestCase):
     def setUp(self):
         self.mod = _load_server_module()
 
-    def test_accepts_alnum_underscore_dash(self):
-        for ok in ("workspace-1", "surface_77", "ABC123", "a", "x" * 128):
+    def test_accepts_alnum_underscore_dash_and_cmux_refs(self):
+        for ok in (
+            "workspace-1",
+            "surface_77",
+            "ABC123",
+            "workspace:10",
+            "surface:34",
+            "a",
+            "x" * 128,
+        ):
             self.assertIsNotNone(self.mod.ID_RE.fullmatch(ok), ok)
 
     def test_rejects_path_separators_and_injection(self):

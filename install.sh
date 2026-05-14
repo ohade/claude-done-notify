@@ -156,6 +156,7 @@ cat <<JSONEOF
   }
 ]
 JSONEOF
+echo "After changing Codex hooks, restart Codex and run /hooks once to trust any new hook entries."
 echo
 echo "── cmux focus server (CC-64D) ──"
 echo "Plist rendered to: ${HOME}/Library/LaunchAgents/com.ohad.cmux-focus.plist"

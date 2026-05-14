@@ -119,6 +119,8 @@ For Codex, add these as additional hooks in `~/.codex/hooks.json`. Keep any exis
 }
 ```
 
+After changing Codex hooks, restart Codex and open `/hooks` once to trust any new or modified hook entries. Codex will not run untrusted hooks.
+
 ### 3. Test
 
 Start a new Claude Code session, ask something that takes >10 seconds, switch away from the terminal, and check Slack.
@@ -134,7 +136,7 @@ All config is via environment variables. Set them in `~/.claude-done-notify.env`
 | `CDN_MIN_DURATION` | No | `10` | Minimum turn duration (seconds) before notifying |
 | `CDN_COOLDOWN` | No | `60` | Rate limit between notifications per session (seconds) |
 | `CDN_FOCUS_DELAY` | No | `2` | Seconds to wait before checking focus |
-| `CDN_TERMINAL` | No | `auto` | Terminal mode: `auto`, `wezterm`, `generic`, `none` |
+| `CDN_TERMINAL` | No | `auto` | Terminal mode: `auto`, `cmux`, `ghostty`, `wezterm`, `generic`, `none` |
 | `CDN_AGENT_NAME` | No | `Claude` | Agent label used in fallback titles, e.g. `Codex` |
 | `CDN_SIGNALS_DIR` | No | `~/.claude/session-signals` | Directory for rate-limit marker files |
 | `CDN_LOG_FILE` | No | `~/.claude/hooks/debug-claude-done-notify.log` | Debug log path |
@@ -216,6 +218,8 @@ curl -s -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
 - If using a PTY proxy like claude-chill, verify `WEZTERM_PANE` is inherited: `echo $WEZTERM_PANE`
 - The debug log shows `(src=env)` when using the env var, `(src=tty)` when using PPID→TTY matching
 - If `WEZTERM_PANE` is empty, the proxy may not be forwarding the env var
+- For cmux, make sure the cmux hook runs before this notifier so `~/.cmuxterm/*-hook-sessions.json` has the session's `workspaceId` and `surfaceId`.
+- For Codex, check `/hooks`: a new hook can be present in `~/.codex/hooks.json` but still not run until trusted.
 
 ## Creating a Slack bot
 

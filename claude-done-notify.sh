@@ -129,6 +129,73 @@ normalize_hook_event() {
     esac
 }
 
+cmux_agent_key() {
+    local lowered
+    lowered=$(echo "${AGENT_NAME:-Claude}" | tr '[:upper:]' '[:lower:]')
+    case "$lowered" in
+        codex*) echo "codex" ;;
+        *) echo "claude" ;;
+    esac
+}
+
+read_cmux_session_identity() {
+    local agent_key state_file
+    agent_key=$(cmux_agent_key)
+    state_file="${HOME}/.cmuxterm/${agent_key}-hook-sessions.json"
+    [[ -n "${SESSION_ID:-}" && -f "$state_file" ]] || return 0
+    jq -r --arg sid "$SESSION_ID" '
+        .sessions[$sid]?
+        | select(.workspaceId and .surfaceId)
+        | "\(.workspaceId)|\(.surfaceId)"
+    ' "$state_file" 2>/dev/null | head -1
+}
+
+cmux_workspace_from_identify() {
+    jq -r '
+        .caller.workspace_id // .caller.workspaceId //
+        .caller.workspace_ref // .caller.workspaceRef //
+        .focused.workspace_id // .focused.workspaceId //
+        .focused.workspace_ref // .focused.workspaceRef // empty
+    ' 2>/dev/null
+}
+
+cmux_surface_from_identify() {
+    jq -r '
+        .caller.surface_id // .caller.surfaceId //
+        .caller.panel_id // .caller.panelId //
+        .caller.surface_ref // .caller.surfaceRef //
+        .caller.panel_ref // .caller.panelRef //
+        .focused.surface_id // .focused.surfaceId //
+        .focused.panel_id // .focused.panelId //
+        .focused.surface_ref // .focused.surfaceRef //
+        .focused.panel_ref // .focused.panelRef // empty
+    ' 2>/dev/null
+}
+
+capture_cmux_identity() {
+    local ws sf state_line identify_json
+    ws="${CMUX_WORKSPACE_ID:-}"
+    sf="${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}"
+
+    if [[ -z "$ws" || -z "$sf" ]]; then
+        state_line=$(read_cmux_session_identity)
+        if [[ -n "$state_line" ]]; then
+            [[ -z "$ws" ]] && ws=$(echo "$state_line" | cut -d'|' -f1)
+            [[ -z "$sf" ]] && sf=$(echo "$state_line" | cut -d'|' -f2)
+        fi
+    fi
+
+    if command -v cmux &>/dev/null &&
+       [[ -z "$ws" || -z "$sf" ]] &&
+       [[ "${CDN_TERMINAL:-auto}" == "cmux" || -n "${CMUX_WORKSPACE_ID:-}${CMUX_SURFACE_ID:-}${CMUX_PANEL_ID:-}" ]]; then
+        identify_json=$(cmux identify 2>/dev/null || echo "{}")
+        [[ -z "$ws" ]] && ws=$(echo "$identify_json" | cmux_workspace_from_identify)
+        [[ -z "$sf" ]] && sf=$(echo "$identify_json" | cmux_surface_from_identify)
+    fi
+
+    [[ -n "$ws" && -n "$sf" ]] && printf '%s|%s\n' "$ws" "$sf"
+}
+
 # ── Read hook input from stdin ──
 INPUT=$(cat)
 echo "$(date '+%H:%M:%S') INPUT=$(echo "$INPUT" | jq -c '.' 2>/dev/null || echo 'parse-error')" >&2
@@ -155,8 +222,13 @@ fi
 # ── Handle UserPromptSubmit: save start timestamp + Ghostty tab info ──
 START_FILE="${SIGNALS_DIR}/${SESSION_ID}.notify-start"
 TAB_INFO_FILE="${SIGNALS_DIR}/${SESSION_ID}.tab-info"
+CMUX_INFO_FILE="${SIGNALS_DIR}/${SESSION_ID}.cmux-info"
 if [[ "$HOOK_EVENT" == "UserPromptSubmit" ]]; then
     date +%s > "$START_FILE"
+    _CMUX_LINE=$(capture_cmux_identity)
+    if [[ -n "$_CMUX_LINE" ]]; then
+        echo "$_CMUX_LINE" > "$CMUX_INFO_FILE"
+    fi
     # For Ghostty: save the real tab info NOW (before Stop hooks overwrite the title).
     # Uses TTY probe to find the correct terminal even if GHOSTTY_TERMINAL_ID is stale.
     if [[ -n "$GHOSTTY_TERMINAL_ID" ]]; then
@@ -257,24 +329,42 @@ sleep "$FOCUS_DELAY"
 PANE_TITLE=""
 MY_PANE_ID=""
 MY_WORKSPACE_ID=""
+MY_PANE_REF=""
+MY_WORKSPACE_REF=""
 TAB_NUMBER=""
 
 # CC-97: terminal-mode detection lives in detect_terminal_mode() (top of file).
 TERMINAL_MODE=$(detect_terminal_mode)
+if [[ "$TERMINAL_MODE" == "generic" && -f "$CMUX_INFO_FILE" ]]; then
+    TERMINAL_MODE="cmux"
+fi
 
 # ── cmux runtime identity (CC-64D) ──
 if [[ "$TERMINAL_MODE" == "cmux" ]]; then
     MY_WORKSPACE_ID="${CMUX_WORKSPACE_ID:-}"
     MY_PANE_ID="${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}"
+    if [[ -z "$MY_WORKSPACE_ID" || -z "$MY_PANE_ID" ]]; then
+        _CMUX_LINE=$(capture_cmux_identity)
+        if [[ -n "$_CMUX_LINE" ]]; then
+            [[ -z "$MY_WORKSPACE_ID" ]] && MY_WORKSPACE_ID=$(echo "$_CMUX_LINE" | cut -d'|' -f1)
+            [[ -z "$MY_PANE_ID" ]] && MY_PANE_ID=$(echo "$_CMUX_LINE" | cut -d'|' -f2)
+        fi
+    fi
     PANE_TITLE=""
     TAB_NUMBER=""
-    # Optional cmux identify enrichment — best effort, never fail the hook.
-    if command -v cmux &>/dev/null && [[ -z "$MY_WORKSPACE_ID" || -z "$MY_PANE_ID" ]]; then
-        _ID_JSON=$(cmux identify 2>/dev/null || echo "{}")
-        [[ -z "$MY_WORKSPACE_ID" ]] && MY_WORKSPACE_ID=$(echo "$_ID_JSON" | jq -r '.focused.workspace_id // empty' 2>/dev/null || echo "")
-        [[ -z "$MY_PANE_ID" ]] && MY_PANE_ID=$(echo "$_ID_JSON" | jq -r '.focused.surface_id // .focused.panel_id // empty' 2>/dev/null || echo "")
+    # Optional cmux identify enrichment. Newer cmux returns refs
+    # (workspace:10/surface:34) instead of UUID fields, so keep both forms.
+    if command -v cmux &>/dev/null; then
+        _ID_ARGS=()
+        [[ -n "$MY_WORKSPACE_ID" ]] && _ID_ARGS+=(--workspace "$MY_WORKSPACE_ID")
+        [[ -n "$MY_PANE_ID" ]] && _ID_ARGS+=(--surface "$MY_PANE_ID")
+        _ID_JSON=$(cmux identify "${_ID_ARGS[@]}" 2>/dev/null || echo "{}")
+        [[ -z "$MY_WORKSPACE_ID" ]] && MY_WORKSPACE_ID=$(echo "$_ID_JSON" | cmux_workspace_from_identify)
+        [[ -z "$MY_PANE_ID" ]] && MY_PANE_ID=$(echo "$_ID_JSON" | cmux_surface_from_identify)
+        MY_WORKSPACE_REF=$(echo "$_ID_JSON" | jq -r '.caller.workspace_ref // .caller.workspaceRef // empty' 2>/dev/null || echo "")
+        MY_PANE_REF=$(echo "$_ID_JSON" | jq -r '.caller.surface_ref // .caller.surfaceRef // .caller.panel_ref // .caller.panelRef // empty' 2>/dev/null || echo "")
     fi
-    echo "$(date '+%H:%M:%S') PANE: cmux ws=$MY_WORKSPACE_ID surface=$MY_PANE_ID" >&2
+    echo "$(date '+%H:%M:%S') PANE: cmux ws=$MY_WORKSPACE_ID surface=$MY_PANE_ID ws_ref=$MY_WORKSPACE_REF surface_ref=$MY_PANE_REF" >&2
 fi
 
 # ── WezTerm runtime identity ──
@@ -399,14 +489,17 @@ if command -v osascript &>/dev/null; then
                 exit 0
             fi
             FOCUSED_JSON=$(cmux identify 2>/dev/null || echo "{}")
-            FOCUSED_WS=$(echo "$FOCUSED_JSON" | jq -r '.focused.workspace_id // empty' 2>/dev/null || echo "")
-            FOCUSED_SF=$(echo "$FOCUSED_JSON" | jq -r '.focused.surface_id // .focused.panel_id // empty' 2>/dev/null || echo "")
-            echo "$(date '+%H:%M:%S') FOCUS: my=$MY_WORKSPACE_ID/$MY_PANE_ID focused=$FOCUSED_WS/$FOCUSED_SF" >&2
-            if [[ -z "$FOCUSED_WS" || -z "$FOCUSED_SF" ]]; then
+            FOCUSED_WS=$(echo "$FOCUSED_JSON" | jq -r '.focused.workspace_id // .focused.workspaceId // empty' 2>/dev/null || echo "")
+            FOCUSED_SF=$(echo "$FOCUSED_JSON" | jq -r '.focused.surface_id // .focused.surfaceId // .focused.panel_id // .focused.panelId // empty' 2>/dev/null || echo "")
+            FOCUSED_WS_REF=$(echo "$FOCUSED_JSON" | jq -r '.focused.workspace_ref // .focused.workspaceRef // empty' 2>/dev/null || echo "")
+            FOCUSED_SF_REF=$(echo "$FOCUSED_JSON" | jq -r '.focused.surface_ref // .focused.surfaceRef // .focused.panel_ref // .focused.panelRef // empty' 2>/dev/null || echo "")
+            echo "$(date '+%H:%M:%S') FOCUS: my=$MY_WORKSPACE_ID/$MY_PANE_ID refs=$MY_WORKSPACE_REF/$MY_PANE_REF focused=$FOCUSED_WS/$FOCUSED_SF refs=$FOCUSED_WS_REF/$FOCUSED_SF_REF" >&2
+            if [[ -z "$FOCUSED_WS$FOCUSED_WS_REF" || -z "$FOCUSED_SF$FOCUSED_SF_REF" ]]; then
                 echo "$(date '+%H:%M:%S') SKIP: cmux focused, identify returned no focused surface" >&2
                 exit 0
             fi
-            if [[ "$MY_WORKSPACE_ID" == "$FOCUSED_WS" && "$MY_PANE_ID" == "$FOCUSED_SF" ]]; then
+            if { [[ -n "$FOCUSED_WS" && "$MY_WORKSPACE_ID" == "$FOCUSED_WS" ]] || [[ -n "$FOCUSED_WS_REF" && "$MY_WORKSPACE_REF" == "$FOCUSED_WS_REF" ]]; } &&
+               { [[ -n "$FOCUSED_SF" && "$MY_PANE_ID" == "$FOCUSED_SF" ]] || [[ -n "$FOCUSED_SF_REF" && "$MY_PANE_REF" == "$FOCUSED_SF_REF" ]]; }; then
                 echo "$(date '+%H:%M:%S') SKIP: user is on this exact cmux surface" >&2
                 exit 0
             fi

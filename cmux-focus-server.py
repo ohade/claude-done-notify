@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 PORT = int(os.environ.get("CMUX_FOCUS_PORT", "17382"))
 TOKEN_FILE = Path.home() / ".cmux-focus-token"
-ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+ID_RE = re.compile(r"^[A-Za-z0-9_:-]{1,128}$")
 CMUX_BUNDLE_ID = os.environ.get("CMUX_BUNDLE_ID", "com.cmuxterm.app")
 CMUX_PATHS = (
     os.environ.get("CMUX_BUNDLED_CLI_PATH", ""),

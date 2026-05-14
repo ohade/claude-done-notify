@@ -37,7 +37,8 @@ awk '
 
 if ! grep -q '^detect_terminal_mode()' "$HELPERS_TMP" || \
    ! grep -q '^build_focus_link()' "$HELPERS_TMP" || \
-   ! grep -q '^normalize_hook_event()' "$HELPERS_TMP"; then
+   ! grep -q '^normalize_hook_event()' "$HELPERS_TMP" || \
+   ! grep -q '^capture_cmux_identity()' "$HELPERS_TMP"; then
     echo "ERR: helpers extraction failed (markers missing or moved)" >&2
     exit 2
 fi
@@ -130,6 +131,39 @@ assert_eq "event: user_prompt_submit normalizes to UserPromptSubmit" "UserPrompt
 
 assert_eq "event: stop normalizes to Stop" "Stop" \
     "$(normalize_hook_event stop)"
+
+assert_eq "cmux identify: parses newer workspace_ref" "workspace:10" \
+    "$(printf '%s\n' '{"caller":{"workspace_ref":"workspace:10","surface_ref":"surface:34"}}' | cmux_workspace_from_identify)"
+
+assert_eq "cmux identify: parses newer surface_ref" "surface:34" \
+    "$(printf '%s\n' '{"caller":{"workspace_ref":"workspace:10","surface_ref":"surface:34"}}' | cmux_surface_from_identify)"
+
+assert_eq "cmux identify: parses legacy workspace id" "workspace-uuid" \
+    "$(printf '%s\n' '{"focused":{"workspace_id":"workspace-uuid","surface_id":"surface-uuid"}}' | cmux_workspace_from_identify)"
+
+assert_eq "cmux identify: parses legacy surface id" "surface-uuid" \
+    "$(printf '%s\n' '{"focused":{"workspace_id":"workspace-uuid","surface_id":"surface-uuid"}}' | cmux_surface_from_identify)"
+
+CMUX_STATE_HOME=$(mktemp -d -t cdn-cmux-state-XXXXXX)
+mkdir -p "$CMUX_STATE_HOME/.cmuxterm"
+cat > "$CMUX_STATE_HOME/.cmuxterm/codex-hook-sessions.json" <<'EOF'
+{
+  "sessions": {
+    "codex-session": {
+      "workspaceId": "workspace-from-state",
+      "surfaceId": "surface-from-state"
+    }
+  }
+}
+EOF
+CMUX_STATE_RESULT=$(env -i PATH=/usr/bin:/bin HOME="$CMUX_STATE_HOME" \
+    SESSION_ID=codex-session AGENT_NAME=Codex /bin/bash -c "
+        source '$HELPERS_TMP'
+        capture_cmux_identity
+    ")
+assert_eq "cmux identity: reads Codex cmux hook registry" \
+    "workspace-from-state|surface-from-state" "$CMUX_STATE_RESULT"
+rm -rf "$CMUX_STATE_HOME"
 
 # ════════════════════════════════════════════════════════════════════
 # build_focus_link — unit tests
