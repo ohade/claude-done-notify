@@ -15,6 +15,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -101,6 +102,50 @@ class IDRegexTests(unittest.TestCase):
     def test_rejects_path_separators_and_injection(self):
         for bad in ("../etc", "ws/sub", "ws\x00", "ws;ls", "x" * 129, "", "ws.dot"):
             self.assertIsNone(self.mod.ID_RE.fullmatch(bad), bad)
+
+
+class FocusCmuxTests(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_server_module()
+
+    def test_focus_cmux_selects_panel_then_activates_app(self):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess_result(returncode=0, stdout="OK", stderr="")
+
+        with mock.patch.object(self.mod, "resolve_cmux_cli", return_value="/bin/cmux"):
+            with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run):
+                self.mod.focus_cmux("workspace-1", "surface-2")
+
+        self.assertEqual(
+            calls,
+            [
+                ["/bin/cmux", "select-workspace", "--workspace", "workspace-1"],
+                [
+                    "/bin/cmux",
+                    "focus-panel",
+                    "--workspace",
+                    "workspace-1",
+                    "--panel",
+                    "surface-2",
+                ],
+                [
+                    "osascript",
+                    "-e",
+                    'tell application id "com.cmuxterm.app" to activate',
+                ],
+            ],
+        )
+
+
+def subprocess_result(returncode=0, stdout="", stderr=""):
+    return type(
+        "CompletedProcess",
+        (),
+        {"returncode": returncode, "stdout": stdout, "stderr": stderr},
+    )()
 
 
 if __name__ == "__main__":

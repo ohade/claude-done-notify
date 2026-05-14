@@ -13,6 +13,7 @@ import http.server
 import os
 import re
 import secrets
+import socket
 import stat
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from urllib.parse import parse_qs, urlparse
 PORT = int(os.environ.get("CMUX_FOCUS_PORT", "17382"))
 TOKEN_FILE = Path.home() / ".cmux-focus-token"
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+CMUX_BUNDLE_ID = os.environ.get("CMUX_BUNDLE_ID", "com.cmuxterm.app")
 CMUX_PATHS = (
     os.environ.get("CMUX_BUNDLED_CLI_PATH", ""),
     "/opt/homebrew/bin/cmux",
@@ -93,6 +95,18 @@ def run_cmux(cmux, args):
         raise RuntimeError(stderr_tail(result))
 
 
+def activate_cmux_app():
+    result = subprocess.run(
+        ["osascript", "-e", f'tell application id "{CMUX_BUNDLE_ID}" to activate'],
+        timeout=5,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(stderr_tail(result))
+
+
 def focus_cmux(workspace_id, surface_id):
     cmux = resolve_cmux_cli()
     if not cmux:
@@ -100,6 +114,7 @@ def focus_cmux(workspace_id, surface_id):
 
     run_cmux(cmux, ["select-workspace", "--workspace", workspace_id])
     run_cmux(cmux, ["focus-panel", "--workspace", workspace_id, "--panel", surface_id])
+    activate_cmux_app()
 
 
 class FocusHandler(http.server.BaseHTTPRequestHandler):
@@ -151,8 +166,16 @@ class FocusHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body_bytes)))
+        self.send_header("Connection", "close")
         self.end_headers()
+        self.close_connection = True
         self.wfile.write(body_bytes)
+        self.wfile.flush()
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.connection.close()
 
     def _redirect_html(self):
         return (
@@ -167,7 +190,7 @@ class FocusHandler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    server = http.server.HTTPServer(("127.0.0.1", PORT), FocusHandler)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), FocusHandler)
     print(f"cmux-focus-server listening on http://127.0.0.1:{PORT}")
     sys.stdout.flush()
     server.serve_forever()
