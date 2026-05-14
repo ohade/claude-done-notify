@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# claude-done-notify — Slack notification when Claude Code finishes a turn
+# claude-done-notify — Slack notification when an agent finishes a turn
 # https://github.com/ohade/claude-done-notify
 #
-# Sends a Slack message when Claude finishes responding and you're not
+# Sends a Slack message when Claude/Codex finishes responding and you're not
 # looking at the terminal. Supports pane-level focus detection for WezTerm
 # on macOS.
 #
-# Register as a Claude Code hook on UserPromptSubmit and Stop events.
+# Register as a Claude Code or Codex hook on UserPromptSubmit and Stop events.
 # See README.md for setup instructions.
 
 # ── Configuration ──
@@ -32,6 +32,7 @@ SIGNALS_DIR="${CDN_SIGNALS_DIR:-${HOME}/.claude/session-signals}"
 MIN_DURATION="${CDN_MIN_DURATION:-10}"
 COOLDOWN="${CDN_COOLDOWN:-60}"
 FOCUS_DELAY="${CDN_FOCUS_DELAY:-2}"
+AGENT_NAME="${CDN_AGENT_NAME:-Claude}"
 
 mkdir -p "$SIGNALS_DIR"
 
@@ -110,15 +111,38 @@ build_focus_link() {
     esac
 }
 
+normalize_hook_event() {
+    local raw lowered compact
+    raw="${1:-}"
+    lowered=$(echo "$raw" | tr '[:upper:]' '[:lower:]')
+    compact=$(echo "$lowered" | tr -d '_- ')
+    case "$compact" in
+        userpromptsubmit|promptsubmit)
+            echo "UserPromptSubmit"
+            ;;
+        stop)
+            echo "Stop"
+            ;;
+        *)
+            echo "$raw"
+            ;;
+    esac
+}
+
 # ── Read hook input from stdin ──
 INPUT=$(cat)
 echo "$(date '+%H:%M:%S') INPUT=$(echo "$INPUT" | jq -c '.' 2>/dev/null || echo 'parse-error')" >&2
 
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
-HOOK_EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // empty')
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty')
-LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty')
+HOOK_EVENT_ARG="${1:-}"
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // .sessionId // empty')
+if [[ -z "$SESSION_ID" && -n "${CODEX_THREAD_ID:-}" ]]; then
+    SESSION_ID="$CODEX_THREAD_ID"
+fi
+HOOK_EVENT_RAW="${HOOK_EVENT_ARG:-$(echo "$INPUT" | jq -r '.hook_event_name // .hookEventName // .event_name // .eventName // .event // empty')}"
+HOOK_EVENT=$(normalize_hook_event "$HOOK_EVENT_RAW")
+CWD=$(echo "$INPUT" | jq -r '.cwd // .working_directory // .workingDirectory // empty')
+TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // .transcriptPath // empty')
+LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // .lastAssistantMessage // .last_agent_message // .lastAgentMessage // empty')
 
 [[ -z "$SESSION_ID" ]] && { echo "$(date '+%H:%M:%S') SKIP: no session_id" >&2; exit 0; }
 
@@ -432,7 +456,7 @@ if [[ -z "$SESSION_NAME" || "$SESSION_NAME" == "null" ]]; then
     if [[ -n "$PANE_TITLE" ]]; then
         SESSION_NAME=$(echo "$PANE_TITLE" | sed 's/^[^a-zA-Z0-9]*//')
     else
-        SESSION_NAME="Claude session"
+        SESSION_NAME="${AGENT_NAME} session"
     fi
 fi
 
@@ -451,6 +475,17 @@ fi
 if [[ -z "$RAW_TEXT" && -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
     RAW_TEXT=$(tail -100 "$TRANSCRIPT_PATH" 2>/dev/null \
         | jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text' 2>/dev/null \
+        | tail -1)
+fi
+
+# Codex transcript fallback: final-answer agent_message or task_complete payload.
+if [[ -z "$RAW_TEXT" && -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
+    RAW_TEXT=$(tail -200 "$TRANSCRIPT_PATH" 2>/dev/null \
+        | jq -r '
+            select(.type == "event_msg")
+            | select(.payload.type == "agent_message" or .payload.type == "task_complete")
+            | (.payload.message // .payload.last_agent_message // empty)
+        ' 2>/dev/null \
         | tail -1)
 fi
 

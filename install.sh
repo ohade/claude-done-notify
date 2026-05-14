@@ -130,6 +130,33 @@ echo
 echo "Done! Start a new Claude Code session to test."
 echo "Debug log: ~/.claude/hooks/debug-claude-done-notify.log"
 echo
+echo "For Codex, add these as additional hooks to ~/.codex/hooks.json:"
+echo
+cat <<JSONEOF
+"UserPromptSubmit": [
+  {
+    "hooks": [
+      {
+        "type": "command",
+        "command": "CDN_AGENT_NAME=Codex ${HOOK_PATH} UserPromptSubmit",
+        "timeout": 5000
+      }
+    ]
+  }
+],
+"Stop": [
+  {
+    "hooks": [
+      {
+        "type": "command",
+        "command": "CDN_AGENT_NAME=Codex ${HOOK_PATH} Stop",
+        "timeout": 15000
+      }
+    ]
+  }
+]
+JSONEOF
+echo
 echo "── cmux focus server (CC-64D) ──"
 echo "Plist rendered to: ${HOME}/Library/LaunchAgents/com.ohad.cmux-focus.plist"
 echo "Load with: launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.ohad.cmux-focus.plist"

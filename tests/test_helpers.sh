@@ -36,7 +36,8 @@ awk '
 ' "$SOURCE" > "$CMUX_RUNTIME_TMP"
 
 if ! grep -q '^detect_terminal_mode()' "$HELPERS_TMP" || \
-   ! grep -q '^build_focus_link()' "$HELPERS_TMP"; then
+   ! grep -q '^build_focus_link()' "$HELPERS_TMP" || \
+   ! grep -q '^normalize_hook_event()' "$HELPERS_TMP"; then
     echo "ERR: helpers extraction failed (markers missing or moved)" >&2
     exit 2
 fi
@@ -117,6 +118,18 @@ WEZTERM_RESULT=$(env -i PATH="$FAKE_WEZTERM_DIR" HOME="$HOME" /bin/bash -c "
 ")
 assert_eq "detect: wezterm when found on PATH" "wezterm" "$WEZTERM_RESULT"
 rm -rf "$FAKE_WEZTERM_DIR"
+
+assert_eq "event: UserPromptSubmit passes through" "UserPromptSubmit" \
+    "$(normalize_hook_event UserPromptSubmit)"
+
+assert_eq "event: prompt-submit normalizes to UserPromptSubmit" "UserPromptSubmit" \
+    "$(normalize_hook_event prompt-submit)"
+
+assert_eq "event: user_prompt_submit normalizes to UserPromptSubmit" "UserPromptSubmit" \
+    "$(normalize_hook_event user_prompt_submit)"
+
+assert_eq "event: stop normalizes to Stop" "Stop" \
+    "$(normalize_hook_event stop)"
 
 # ════════════════════════════════════════════════════════════════════
 # build_focus_link — unit tests
@@ -305,6 +318,94 @@ REG_GENERIC=$(env -i PATH=/nonexistent HOME="$HOME" /bin/bash -c "
 ")
 assert_eq "regression: generic with no env + no wezterm (matches old 'else')" \
     "generic" "$REG_GENERIC"
+
+# ════════════════════════════════════════════════════════════════════
+# Codex hook integration
+# ════════════════════════════════════════════════════════════════════
+CODEX_TMP=$(mktemp -d -t cdn-codex-test-XXXXXX)
+FAKE_BIN="$CODEX_TMP/bin"
+mkdir -p "$FAKE_BIN"
+
+cat > "$FAKE_BIN/curl" <<'EOF'
+#!/bin/sh
+payload=""
+url=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -d)
+            shift
+            payload="$1"
+            ;;
+        http*)
+            url="$1"
+            ;;
+    esac
+    shift || break
+done
+printf '%s\n' "$url" >> "$FAKE_CURL_URLS"
+printf '%s\n---payload---\n' "$payload" >> "$FAKE_CURL_PAYLOADS"
+printf '{"ok":true,"ts":"123.456"}\n'
+EOF
+chmod +x "$FAKE_BIN/curl"
+
+cat > "$FAKE_BIN/osascript" <<'EOF'
+#!/bin/sh
+printf 'Arc\n'
+EOF
+chmod +x "$FAKE_BIN/osascript"
+
+CODEX_HOME_DIR="$CODEX_TMP/home"
+CODEX_SIGNALS="$CODEX_TMP/signals"
+CODEX_LOG="$CODEX_TMP/hook.log"
+CODEX_CONFIG="$CODEX_TMP/config.env"
+CODEX_PAYLOADS="$CODEX_TMP/curl-payloads.log"
+CODEX_URLS="$CODEX_TMP/curl-urls.log"
+mkdir -p "$CODEX_HOME_DIR" "$CODEX_SIGNALS"
+cat > "$CODEX_CONFIG" <<'EOF'
+SLACK_BOT_TOKEN="xoxb-test"
+SLACK_CHANNEL="DTEST"
+EOF
+
+CODEX_ENV=(
+    "PATH=$FAKE_BIN:/opt/homebrew/bin:/usr/bin:/bin"
+    "HOME=$CODEX_HOME_DIR"
+    "CDN_CONFIG_FILE=$CODEX_CONFIG"
+    "CDN_SIGNALS_DIR=$CODEX_SIGNALS"
+    "CDN_LOG_FILE=$CODEX_LOG"
+    "CDN_FOCUS_DELAY=0"
+    "CDN_MIN_DURATION=10"
+    "CDN_COOLDOWN=0"
+    "CDN_TERMINAL=generic"
+    "CDN_AGENT_NAME=Codex"
+    "FAKE_CURL_PAYLOADS=$CODEX_PAYLOADS"
+    "FAKE_CURL_URLS=$CODEX_URLS"
+)
+
+env -i "${CODEX_ENV[@]}" /bin/bash "$SOURCE" UserPromptSubmit <<'EOF'
+{"session_id":"codex-test-session","cwd":"/tmp/codex-project"}
+EOF
+printf '%s\n' "$(($(date +%s) - 15))" > "$CODEX_SIGNALS/codex-test-session.notify-start"
+env -i "${CODEX_ENV[@]}" /bin/bash "$SOURCE" stop <<'EOF'
+{"session_id":"codex-test-session","cwd":"/tmp/codex-project","last_agent_message":"Codex finished cleanly"}
+EOF
+
+if grep -q 'SENT: ok=true session=Codex session' "$CODEX_LOG"; then
+    PASS=$((PASS+1))
+else
+    FAIL=$((FAIL+1))
+    printf 'FAIL: codex integration sent Slack notification\n'
+    sed -n '1,160p' "$CODEX_LOG"
+fi
+
+if grep -q 'Codex finished cleanly' "$CODEX_PAYLOADS"; then
+    PASS=$((PASS+1))
+else
+    FAIL=$((FAIL+1))
+    printf 'FAIL: codex integration used last_agent_message\n'
+    sed -n '1,160p' "$CODEX_PAYLOADS"
+fi
+
+rm -rf "$CODEX_TMP"
 
 # ════════════════════════════════════════════════════════════════════
 # Summary

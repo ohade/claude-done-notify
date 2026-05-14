@@ -1,12 +1,12 @@
 # claude-done-notify
 
-Slack notifications when [Claude Code](https://docs.anthropic.com/en/docs/claude-code) finishes a turn and you're not looking at the terminal.
+Slack notifications when [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or Codex finishes a turn and you're not looking at the terminal.
 
 ## What it does
 
-A [Claude Code hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that sends a Slack message when:
+A hook that sends a Slack message when:
 
-- Claude finishes responding (Stop event)
+- Claude/Codex finishes responding (Stop event)
 - The turn took longer than a configurable threshold (default: 10s)
 - You're not currently looking at the terminal pane
 
@@ -14,12 +14,12 @@ A [Claude Code hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that 
 
 - **Smart focus detection** (macOS + WezTerm): skips the notification if you're looking at the exact terminal pane where Claude is running. Works through PTY proxies like [claude-chill](https://github.com/nickarella/claude-chill)
 - **Rate limiting**: max one notification per 60s per session (configurable)
-- **Session context**: message includes the session name and a summary of Claude's response
+- **Session context**: message includes the session name and a summary of the agent's response
 - **Minimal dependencies**: bash, curl, jq
 
 ## Requirements
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI with hooks support
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or Codex CLI with hooks support
 - A Slack bot token with `chat:write` scope ([create one](https://api.slack.com/apps))
 - `jq` and `curl`
 - macOS recommended (for focus detection via `osascript`); works on Linux without focus detection
@@ -56,7 +56,7 @@ SLACK_BOT_TOKEN="xoxb-your-token-here"
 SLACK_CHANNEL="D01234ABCDE"
 ```
 
-### 2. Register hooks
+### 2. Register Claude Code hooks
 
 Add to your `~/.claude/settings.json` (merge into existing `hooks` if you have them):
 
@@ -88,6 +88,37 @@ Add to your `~/.claude/settings.json` (merge into existing `hooks` if you have t
 }
 ```
 
+For Codex, add these as additional hooks in `~/.codex/hooks.json`. Keep any existing cmux hooks; these entries only add Slack done notifications:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CDN_AGENT_NAME=Codex /path/to/claude-done-notify/claude-done-notify.sh UserPromptSubmit",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CDN_AGENT_NAME=Codex /path/to/claude-done-notify/claude-done-notify.sh Stop",
+            "timeout": 15000
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 ### 3. Test
 
 Start a new Claude Code session, ask something that takes >10 seconds, switch away from the terminal, and check Slack.
@@ -104,13 +135,14 @@ All config is via environment variables. Set them in `~/.claude-done-notify.env`
 | `CDN_COOLDOWN` | No | `60` | Rate limit between notifications per session (seconds) |
 | `CDN_FOCUS_DELAY` | No | `2` | Seconds to wait before checking focus |
 | `CDN_TERMINAL` | No | `auto` | Terminal mode: `auto`, `wezterm`, `generic`, `none` |
+| `CDN_AGENT_NAME` | No | `Claude` | Agent label used in fallback titles, e.g. `Codex` |
 | `CDN_SIGNALS_DIR` | No | `~/.claude/session-signals` | Directory for rate-limit marker files |
 | `CDN_LOG_FILE` | No | `~/.claude/hooks/debug-claude-done-notify.log` | Debug log path |
 | `CDN_CONFIG_FILE` | No | `~/.claude-done-notify.env` | Override config file location |
 
 ## How it works
 
-The hook uses a two-phase approach tied to Claude Code's lifecycle events:
+The hook uses a two-phase approach tied to agent lifecycle events:
 
 1. **UserPromptSubmit** — records a start timestamp for this turn
 2. **Stop** — evaluates the filter chain and sends a notification if all gates pass
@@ -152,7 +184,7 @@ The session name comes from (in priority order):
 1. Custom session title (set via `/rename` in Claude Code)
 2. First prompt of the session (truncated)
 3. WezTerm pane title
-4. "Claude session" fallback
+4. "`$CDN_AGENT_NAME` session" fallback
 
 ## Troubleshooting
 
