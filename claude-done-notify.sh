@@ -15,7 +15,15 @@ CONFIG_FILE="${CDN_CONFIG_FILE:-${HOME}/.claude-done-notify.env}"
 [[ -f "$CONFIG_FILE" ]] && . "$CONFIG_FILE"
 
 LOG="${CDN_LOG_FILE:-${HOME}/.claude/hooks/debug-claude-done-notify.log}"
-exec 2>>"$LOG"
+# Redaction-on-write (ai-audit A7, 2026-06-15): strip any xoxb- Slack token from EVERYTHING
+# written to the debug log (the hook logs its stdin, which can contain an assistant message
+# that quotes a token). BSD sed -l = line-buffered so lines flush promptly before exit.
+# Fall back to a plain append if the redactor can't start, so logging never breaks the hook.
+if command -v sed >/dev/null 2>&1; then
+    exec 2> >(sed -l -E 's/xoxb-[A-Za-z0-9-]+/xoxb-<REDACTED>/g' >> "$LOG" 2>/dev/null)
+else
+    exec 2>>"$LOG"
+fi
 
 # Required config — exit silently (exit 0) if missing, to never disrupt Claude
 if [[ -z "$SLACK_BOT_TOKEN" ]]; then
