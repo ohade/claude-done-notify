@@ -15,6 +15,10 @@ CONFIG_FILE="${CDN_CONFIG_FILE:-${HOME}/.claude-done-notify.env}"
 [[ -f "$CONFIG_FILE" ]] && . "$CONFIG_FILE"
 
 LOG="${CDN_LOG_FILE:-${HOME}/.claude/hooks/debug-claude-done-notify.log}"
+# Log rotation (ai-audit M2-7): cap the debug log at ~1MB, keep one prior generation.
+if [[ -f "$LOG" ]] && [[ $(wc -c < "$LOG" 2>/dev/null || echo 0) -gt 1048576 ]]; then
+    mv -f "$LOG" "$LOG.1" 2>/dev/null || true
+fi
 # Redaction-on-write (ai-audit A7, 2026-06-15): strip any xoxb- Slack token from EVERYTHING
 # written to the debug log (the hook logs its stdin, which can contain an assistant message
 # that quotes a token). BSD sed -l = line-buffered so lines flush promptly before exit.
@@ -791,7 +795,7 @@ get_tab_thread_ts() {
                 local updated_text update_response update_ok
                 updated_text=$(_thread_parent_text)
 
-                update_response=$(curl -s -X POST "https://slack.com/api/chat.update" \
+                update_response=$(curl -s --max-time 10 -X POST "https://slack.com/api/chat.update" \
                     -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
                     -H "Content-Type: application/json" \
                     -d "$(jq -n \
@@ -819,7 +823,7 @@ get_tab_thread_ts() {
     local parent_text parent_response parent_ts
     parent_text=$(_thread_parent_text)
 
-    parent_response=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
+    parent_response=$(curl -s --max-time 10 -X POST "https://slack.com/api/chat.postMessage" \
         -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
         -H "Content-Type: application/json" \
         -d "$(jq -n \
@@ -862,7 +866,7 @@ if [[ -n "$SLACK_BOT_TOKEN" && "$SLACK_BOT_TOKEN" != "null" ]]; then
             {channel: $channel, text: $text, blocks: $blocks, unfurl_links: false, unfurl_media: false}
         end')
 
-    RESPONSE=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
+    RESPONSE=$(curl -s --max-time 10 -X POST "https://slack.com/api/chat.postMessage" \
         -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
         -H "Content-Type: application/json" \
         -d "$PAYLOAD")
