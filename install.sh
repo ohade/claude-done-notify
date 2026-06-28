@@ -71,7 +71,7 @@ echo "Ensured hooks log directory: $HOOKS_LOG_DIR"
 
 # ── Step 2b: Render cmux focus LaunchAgent plist from template (CC-95 audit fix) ──
 # The template carries placeholders so the plist works for any user/checkout
-# layout instead of hardcoding /Users/ohad.e/... — that hardcode produced a
+# layout instead of hardcoding a local absolute path — that hardcode produced a
 # permanent crash-loop for any other user, with KeepAlive=true respawning every
 # 5s. We also detect python3 dynamically (no hardcoded /usr/bin/python3) and
 # install.sh writes the rendered plist directly to ~/Library/LaunchAgents.
