@@ -79,7 +79,8 @@ Add to your `~/.claude/settings.json` (merge into existing `hooks` if you have t
           {
             "type": "command",
             "command": "/path/to/claude-done-notify/claude-done-notify.sh",
-            "timeout": 15000
+            "timeout": 15000,
+            "async": true
           }
         ]
       }
@@ -87,6 +88,12 @@ Add to your `~/.claude/settings.json` (merge into existing `hooks` if you have t
   }
 }
 ```
+
+`"async": true` on the Claude `Stop` hook is recommended. Claude Code holds a turn open until its
+synchronous Stop hooks exit, and this hook waits `CDN_FOCUS_DELAY` (2 s by default) before its
+focus check, so without `async` most turn ends wait about 3 s. The hook only sends Slack and never
+blocks Claude, so running it in the background loses nothing. Keep `UserPromptSubmit` synchronous:
+it records the turn start time that the Stop hook reads.
 
 For Codex, add these as additional hooks in `~/.codex/hooks.json`. Keep any existing cmux hooks; these entries only add Slack done notifications:
 

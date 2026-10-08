@@ -119,7 +119,8 @@ cat <<JSONEOF
         {
           "type": "command",
           "command": "${HOOK_PATH}",
-          "timeout": 15000
+          "timeout": 15000,
+          "async": true
         }
       ]
     }
